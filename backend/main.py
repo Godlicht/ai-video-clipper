@@ -69,16 +69,26 @@ ProbeFunction = Callable[[Path, str], Awaitable[MediaInfo | None]]
 
 def cleanup_pending_files(database: Database) -> None:
     with database.connection() as connection:
-        rows = connection.execute("SELECT path FROM pending_file_deletions").fetchall()
+        rows = connection.execute(
+            "SELECT project_id, source_path, quarantine_path FROM pending_file_deletions"
+        ).fetchall()
     for row in rows:
-        file_path = Path(row["path"])
+        source = Path(row["source_path"])
+        quarantine = Path(row["quarantine_path"])
         try:
-            file_path.unlink(missing_ok=True)
+            if source.exists() and not quarantine.exists():
+                source.replace(quarantine)
+            with database.connection() as connection:
+                connection.execute("DELETE FROM projects WHERE id = ?", (row["project_id"],))
+            quarantine.unlink(missing_ok=True)
         except OSError:
-            logger.warning("Nie udało się jeszcze usunąć pliku %s", file_path)
+            logger.warning("Nie udało się jeszcze usunąć pliku %s", quarantine)
             continue
         with database.connection() as connection:
-            connection.execute("DELETE FROM pending_file_deletions WHERE path = ?", (str(file_path),))
+            connection.execute(
+                "DELETE FROM pending_file_deletions WHERE project_id = ?",
+                (row["project_id"],),
+            )
 
 
 def create_app(
@@ -318,13 +328,18 @@ def create_app(
         source = Path(row["source_path"])
         quarantine = source.with_name(f"{source.name}.deleting-{uuid4()}")
         try:
+            with database.connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO pending_file_deletions (
+                      project_id, source_path, quarantine_path, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (project_id, str(source), str(quarantine), now_iso()),
+                )
             if source.exists():
                 source.replace(quarantine)
             with database.connection() as connection:
-                connection.execute(
-                    "INSERT INTO pending_file_deletions (path, created_at) VALUES (?, ?)",
-                    (str(quarantine), now_iso()),
-                )
                 connection.execute(
                     "DELETE FROM projects WHERE id = ? AND user_id = ?",
                     (project_id, user["id"]),
@@ -332,6 +347,11 @@ def create_app(
         except Exception as exc:
             if quarantine.exists() and not source.exists():
                 quarantine.replace(source)
+            with database.connection() as connection:
+                connection.execute(
+                    "DELETE FROM pending_file_deletions WHERE project_id = ?",
+                    (project_id,),
+                )
             logger.exception("Nie udało się usunąć projektu")
             raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
         cleanup_pending_files(database)

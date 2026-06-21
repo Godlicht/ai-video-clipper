@@ -277,3 +277,28 @@ def test_delete_uses_durable_cleanup_journal(api, monkeypatch):
     with database.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 0
     assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_cleanup_recovers_crash_before_quarantine_rename(api):
+    client, database, settings = api
+    token = register(client)
+    project = upload(client, token, "crash.mp4", b"video", "video/mp4").json()["project"]
+    source = next(settings.upload_dir.iterdir())
+    quarantine = source.with_name(f"{source.name}.deleting-crash")
+
+    with database.connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO pending_file_deletions (
+              project_id, source_path, quarantine_path, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (project["id"], str(source), str(quarantine), "2026-01-01T00:00:00+00:00"),
+        )
+
+    cleanup_pending_files(database)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 0
+    assert not source.exists()
+    assert not quarantine.exists()

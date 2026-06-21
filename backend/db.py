@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS exports (
 );
 
 CREATE TABLE IF NOT EXISTS pending_file_deletions (
-  path TEXT PRIMARY KEY,
+  project_id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  quarantine_path TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 """
@@ -102,6 +104,35 @@ class Database:
             if self.path != ":memory:":
                 connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(pending_file_deletions)").fetchall()
+            }
+            if "project_id" not in columns:
+                legacy_paths = [
+                    row["path"]
+                    for row in connection.execute(
+                        "SELECT path FROM pending_file_deletions"
+                    ).fetchall()
+                ]
+                connection.execute("DROP TABLE pending_file_deletions")
+                connection.execute(
+                    """
+                    CREATE TABLE pending_file_deletions (
+                      project_id TEXT PRIMARY KEY,
+                      source_path TEXT NOT NULL,
+                      quarantine_path TEXT NOT NULL,
+                      created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                for legacy_path in legacy_paths:
+                    try:
+                        Path(legacy_path).unlink(missing_ok=True)
+                    except OSError:
+                        # The legacy schema represented files whose DB rows were
+                        # already deleted. A failed cleanup can be retried manually.
+                        pass
 
     def close(self) -> None:
         if self._memory_connection:

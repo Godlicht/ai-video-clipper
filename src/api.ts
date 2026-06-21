@@ -58,9 +58,15 @@ export const api = {
     apiRequest<{ projects: ApiProject[] }>("/api/projects", {}, token),
 
   createProject: (token: string, file: File, title?: string, signal?: AbortSignal) => {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const inferredMime = extension === "mov"
+      ? "video/quicktime"
+      : extension === "webm"
+        ? "video/webm"
+        : "video/mp4";
     const headers: Record<string, string> = {
       "X-Filename": encodeURIComponent(file.name),
-      "X-Mime-Type": file.type,
+      "X-Mime-Type": file.type || inferredMime,
     };
     if (title) headers["X-Project-Title"] = encodeURIComponent(title);
     return apiRequest<{ project: ApiProject }>("/api/projects", {
