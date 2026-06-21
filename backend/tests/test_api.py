@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import sqlite3
 from concurrent.futures import CancelledError as FutureCancelledError
 from pathlib import Path
@@ -339,7 +340,7 @@ def test_render_blocks_delete_and_reanalysis_until_completed(tmp_path: Path):
     database.close()
 
 
-def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path):
+def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path, monkeypatch):
     settings = Settings(
         jwt_secret="test-secret-with-enough-entropy-" * 2,
         database_path=Path(":memory:"),
@@ -351,10 +352,29 @@ def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path):
     async def valid_probe(_file_path: Path, _ffprobe_path: str) -> MediaInfo:
         return MediaInfo(duration=60, format_name="mov,mp4,m4a,3gp,3g2,mj2", has_video=True)
 
-    async def broken_render(*_args) -> None:
+    async def broken_render(
+        _ffmpeg: str,
+        _source: Path,
+        output: Path,
+        _start: float,
+        _end: float,
+        _ratio: str,
+        _quality: str,
+    ) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"partial")
         raise ValueError("unexpected")
 
-    with TestClient(create_app(settings, database, valid_probe, broken_render)) as client:
+    app = create_app(settings, database, valid_probe, broken_render)
+    original_unlink = Path.unlink
+
+    def fail_partial_cleanup(path: Path, *args, **kwargs):
+        if path.name.endswith(".mp4") and path.parent.parent == settings.export_dir:
+            raise PermissionError("locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_partial_cleanup)
+    with TestClient(app) as client:
         token = register(client)
         project = upload(client, token, "broken.mp4", b"video", "video/mp4").json()["project"]
         clip = client.post(
@@ -376,6 +396,16 @@ def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path):
         assert export["status"] == "failed"
         assert "unexpected" in export["error_message"]
     database.close()
+
+
+def test_project_locks_do_not_accumulate_for_missing_ids(api):
+    client, _database, _settings = api
+    token = register(client)
+    for index in range(100):
+        response = client.post(f"/api/projects/missing-{index}/analysis", headers=auth(token))
+        assert response.status_code == 404
+    gc.collect()
+    assert len(client.app.state.project_locks) == 0
 
 
 def test_projects_are_isolated_between_users(api):

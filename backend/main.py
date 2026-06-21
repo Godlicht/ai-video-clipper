@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import sqlite3
+from weakref import WeakValueDictionary
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,7 +151,7 @@ def create_app(
     current_user = auth_dependency(database, app_settings)
     ffprobe_path = resolve_media_tool("ffprobe", app_settings.ffprobe_path)
     ffmpeg_path = resolve_media_tool("ffmpeg", app_settings.ffmpeg_path)
-    project_locks: dict[str, asyncio.Lock] = {}
+    project_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
     def project_lock(project_id: str) -> asyncio.Lock:
         return project_locks.setdefault(project_id, asyncio.Lock())
@@ -158,6 +159,7 @@ def create_app(
     app = FastAPI(title="Cutwise API", version="0.2.0")
     app.state.settings = app_settings
     app.state.database = database
+    app.state.project_locks = project_locks
     app.add_middleware(
         RequestSizeLimitMiddleware,
         max_bytes=app_settings.max_upload_bytes,
@@ -526,12 +528,15 @@ def create_app(
                     )
                 raise
             except Exception as exc:
-                output.unlink(missing_ok=True)
                 with database.connection() as connection:
                     connection.execute(
                         "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
                         (str(exc)[-1000:], export_id),
                     )
+                try:
+                    output.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Nie udało się usunąć częściowego eksportu %s", output)
                 logger.exception("Nie udało się wyrenderować klipu")
                 raise HTTPException(status_code=500, detail="Nie udało się wyrenderować klipu.") from exc
             with database.connection() as connection:
