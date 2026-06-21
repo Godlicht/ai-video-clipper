@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import CancelledError as FutureCancelledError
 from pathlib import Path
 
 import jwt
@@ -8,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from backend.config import Settings
 from backend.db import Database
-from backend.main import create_app
+from backend.main import cleanup_pending_files, create_app
 from backend.media import MediaInfo
 
 
@@ -110,9 +112,18 @@ def test_upload_list_media_and_delete_project(api):
     assert projects.status_code == 200
     assert len(projects.json()["projects"]) == 1
 
-    media = client.get(f"/api/projects/{project['id']}/media", headers=auth(token))
+    media_access = client.post(
+        f"/api/projects/{project['id']}/media-access",
+        headers=auth(token),
+    )
+    assert media_access.status_code == 200
+    media = client.get(media_access.json()["url"])
     assert media.status_code == 200
     assert media.content == b"video-content"
+    ranged_media = client.get(media_access.json()["url"], headers={"Range": "bytes=0-4"})
+    assert ranged_media.status_code == 206
+    assert ranged_media.content == b"video"
+    assert client.get(f"/api/projects/{project['id']}/media?token=invalid").status_code == 401
 
     deleted = client.delete(f"/api/projects/{project['id']}", headers=auth(token))
     assert deleted.status_code == 204
@@ -130,7 +141,10 @@ def test_projects_are_isolated_between_users(api):
     ).json()["project"]
 
     assert client.get(f"/api/projects/{created['id']}", headers=auth(second)).status_code == 404
-    assert client.get(f"/api/projects/{created['id']}/media", headers=auth(second)).status_code == 404
+    assert client.post(
+        f"/api/projects/{created['id']}/media-access",
+        headers=auth(second),
+    ).status_code == 404
 
 
 def test_rejects_unauthenticated_and_wrong_extension(api):
@@ -148,6 +162,17 @@ def test_rejects_unauthenticated_and_wrong_extension(api):
         files={"video": ("notes.txt", b"text", "text/plain")},
     )
     assert invalid.status_code == 400
+
+
+def test_request_limit_rejects_before_endpoint_parses_upload(api):
+    client, _database, settings = api
+    oversized = b"x" * (settings.max_upload_bytes + 9 * 1024 * 1024)
+    response = client.post(
+        "/api/projects",
+        files={"video": ("oversized.mp4", oversized, "video/mp4")},
+    )
+    assert response.status_code == 413
+    assert list(settings.upload_dir.iterdir()) == []
 
 
 def test_invalid_media_is_removed(tmp_path: Path):
@@ -186,4 +211,58 @@ def test_file_is_removed_when_database_insert_fails(api):
         files={"video": ("valid.mp4", b"video", "video/mp4")},
     )
     assert response.status_code == 500
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_cancelled_upload_removes_destination(tmp_path: Path):
+    settings = Settings(
+        jwt_secret="test-secret-with-enough-entropy-" * 2,
+        database_path=Path(":memory:"),
+        upload_dir=tmp_path / "uploads",
+        export_dir=tmp_path / "exports",
+    ).finalized()
+    database = Database(":memory:")
+
+    async def cancelled_probe(_file_path: Path, _ffprobe_path: str):
+        raise asyncio.CancelledError
+
+    with TestClient(create_app(settings, database, cancelled_probe), raise_server_exceptions=True) as client:
+        token = register(client)
+        with pytest.raises((asyncio.CancelledError, FutureCancelledError)):
+            client.post(
+                "/api/projects",
+                headers=auth(token),
+                files={"video": ("cancelled.mp4", b"video", "video/mp4")},
+            )
+        assert list(settings.upload_dir.iterdir()) == []
+    database.close()
+
+
+def test_delete_uses_durable_cleanup_journal(api, monkeypatch):
+    client, database, settings = api
+    token = register(client)
+    project = client.post(
+        "/api/projects",
+        headers=auth(token),
+        files={"video": ("delete.mp4", b"video", "video/mp4")},
+    ).json()["project"]
+
+    original_unlink = Path.unlink
+
+    def fail_quarantine_once(path: Path, *args, **kwargs):
+        if ".deleting-" in path.name:
+            raise OSError("locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_quarantine_once)
+    response = client.delete(f"/api/projects/{project['id']}", headers=auth(token))
+    assert response.status_code == 204
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 1
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    cleanup_pending_files(database)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 0
     assert list(settings.upload_dir.iterdir()) == []

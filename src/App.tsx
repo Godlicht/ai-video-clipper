@@ -363,7 +363,7 @@ function Sidebar({
           Moje klipy
           <span className="nav-count">{clipCount}</span>
         </button>
-        <button>
+        <button onClick={() => onNavigate("home")}>
           <FolderClock size={18} />
           Projekty
         </button>
@@ -524,11 +524,11 @@ function HomeScreen({
             <h3>Ostatnie projekty</h3>
             <p>Wróć do swoich ostatnich nagrań.</p>
           </div>
-          <button onClick={onDemo}>Zobacz wszystkie <ArrowRight size={15} /></button>
+          {!projects.length && <button onClick={onDemo}>Otwórz demo <ArrowRight size={15} /></button>}
         </div>
 
         <div className="project-grid">
-          {projects.slice(0, 3).map((project, index) => (
+          {projects.map((project, index) => (
             <article className="project-card" key={project.id}>
               <button className="project-open" onClick={() => onOpenProject(project)}>
                 <div className={`project-thumb ${["scene-purple", "scene-blue", "scene-green"][index % 3]}`}>
@@ -1263,6 +1263,7 @@ export default function App() {
   const [videoDuration, setVideoDuration] = useState(DEMO_DURATION);
   const [mobileMenu, setMobileMenu] = useState(false);
   const uploadGenerationRef = useRef(0);
+  const uploadAbortRef = useRef<AbortController | null>(null);
 
   const loadProjects = useCallback(async (activeToken: string) => {
     const response = await api.listProjects(activeToken);
@@ -1339,20 +1340,27 @@ export default function App() {
       URL.revokeObjectURL(nextVideoUrl);
       return "Zaloguj się ponownie przed wysłaniem projektu.";
     }
+    const activeToken = token;
+    const uploadController = new AbortController();
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = uploadController;
 
     let persistedProject: ApiProject;
     try {
-      const response = await api.createProject(token, file);
+      const response = await api.createProject(activeToken, file, undefined, uploadController.signal);
       persistedProject = response.project;
     } catch (error) {
       URL.revokeObjectURL(nextVideoUrl);
+      if (error instanceof DOMException && error.name === "AbortError") return undefined;
       return error instanceof Error ? error.message : "Nie udało się zapisać projektu.";
+    } finally {
+      if (uploadAbortRef.current === uploadController) uploadAbortRef.current = null;
     }
 
     if (uploadGeneration !== uploadGenerationRef.current) {
       URL.revokeObjectURL(nextVideoUrl);
-      void api.deleteProject(token, persistedProject.id).catch(() => {
-        void loadProjects(token).catch(() => undefined);
+      void api.deleteProject(activeToken, persistedProject.id).catch(() => {
+        void loadProjects(activeToken).catch(() => undefined);
       });
       return undefined;
     }
@@ -1377,6 +1385,8 @@ export default function App() {
 
   const resetProject = () => {
     uploadGenerationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
     setVideoUrl(undefined);
     setVideoDuration(0);
     setClips([]);
@@ -1388,8 +1398,8 @@ export default function App() {
   const openProject = async (project: ApiProject) => {
     if (!token) return;
     try {
-      const media = await api.getProjectMedia(token, project.id);
-      const nextVideoUrl = URL.createObjectURL(media);
+      const media = await api.getProjectMediaUrl(token, project.id);
+      const nextVideoUrl = media.url;
       const duration = project.durationSeconds ?? await readVideoDuration(nextVideoUrl);
       setFileName(project.sourceFilename);
       setVideoDuration(duration);

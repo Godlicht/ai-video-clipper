@@ -35,6 +35,35 @@ def create_token(user: dict[str, str], settings: Settings) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
+def create_media_token(user_id: str, project_id: str, settings: Settings) -> str:
+    now = datetime.now(UTC)
+    return jwt.encode(
+        {
+            "sub": user_id,
+            "project_id": project_id,
+            "scope": "project_media",
+            "iss": "cutwise",
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+        },
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+
+
+def decode_media_token(token: str, project_id: str, settings: Settings) -> str:
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"], issuer="cutwise")
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="Link do nagrania wygasł.") from exc
+    if payload.get("scope") != "project_media" or payload.get("project_id") != project_id:
+        raise HTTPException(status_code=403, detail="Link nie uprawnia do tego nagrania.")
+    user_id = payload.get("sub")
+    if not isinstance(user_id, str):
+        raise HTTPException(status_code=401, detail="Nieprawidłowy link do nagrania.")
+    return user_id
+
+
 def auth_dependency(database: Database, settings: Settings):
     def current_user(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),

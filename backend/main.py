@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -7,15 +8,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from .auth import auth_dependency, create_token, hash_password, verify_password
+from .auth import (
+    auth_dependency,
+    create_media_token,
+    create_token,
+    decode_media_token,
+    hash_password,
+    verify_password,
+)
 from .config import Settings, settings as default_settings
 from .db import Database
 from .media import MediaInfo, format_matches_extension, probe_media, resolve_media_tool
+from .middleware import RequestSizeLimitMiddleware
 
 
 logger = logging.getLogger("cutwise")
@@ -57,6 +66,20 @@ def serialize_project(row: sqlite3.Row) -> dict:
 ProbeFunction = Callable[[Path, str], Awaitable[MediaInfo | None]]
 
 
+def cleanup_pending_files(database: Database) -> None:
+    with database.connection() as connection:
+        rows = connection.execute("SELECT path FROM pending_file_deletions").fetchall()
+    for row in rows:
+        file_path = Path(row["path"])
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Nie udało się jeszcze usunąć pliku %s", file_path)
+            continue
+        with database.connection() as connection:
+            connection.execute("DELETE FROM pending_file_deletions WHERE path = ?", (str(file_path),))
+
+
 def create_app(
     app_settings: Settings | None = None,
     database: Database | None = None,
@@ -66,12 +89,17 @@ def create_app(
     app_settings.upload_dir.mkdir(parents=True, exist_ok=True)
     app_settings.export_dir.mkdir(parents=True, exist_ok=True)
     database = database or Database(app_settings.database_path)
+    cleanup_pending_files(database)
     current_user = auth_dependency(database, app_settings)
     ffprobe_path = resolve_media_tool("ffprobe", app_settings.ffprobe_path)
 
     app = FastAPI(title="Cutwise API", version="0.2.0")
     app.state.settings = app_settings
     app.state.database = database
+    app.add_middleware(
+        RequestSizeLimitMiddleware,
+        max_bytes=app_settings.max_upload_bytes + 8 * 1024 * 1024,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -215,6 +243,9 @@ def create_app(
                     """,
                     (project_id,),
                 ).fetchone()
+        except asyncio.CancelledError:
+            destination.unlink(missing_ok=True)
+            raise
         except HTTPException:
             destination.unlink(missing_ok=True)
             raise
@@ -226,18 +257,34 @@ def create_app(
             await video.close()
         return {"project": serialize_project(row)}
 
+    @app.post("/api/projects/{project_id}/media-access")
+    def project_media_access(
+        project_id: str,
+        user: dict[str, str] = Depends(current_user),
+    ) -> dict:
+        with database.connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM projects WHERE id = ? AND user_id = ?",
+                (project_id, user["id"]),
+            ).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
+        media_token = create_media_token(user["id"], project_id, app_settings)
+        return {"url": f"/api/projects/{project_id}/media?token={media_token}"}
+
     @app.get("/api/projects/{project_id}/media")
     def project_media(
         project_id: str,
-        user: dict[str, str] = Depends(current_user),
+        token: str = Query(),
     ) -> FileResponse:
+        user_id = decode_media_token(token, project_id, app_settings)
         with database.connection() as connection:
             row = connection.execute(
                 """
                 SELECT source_path, source_filename, mime_type
                 FROM projects WHERE id = ? AND user_id = ?
                 """,
-                (project_id, user["id"]),
+                (project_id, user_id),
             ).fetchone()
         if row is None or not Path(row["source_path"]).is_file():
             raise HTTPException(status_code=404, detail="Plik projektu nie istnieje.")
@@ -268,15 +315,19 @@ def create_app(
                 source.replace(quarantine)
             with database.connection() as connection:
                 connection.execute(
+                    "INSERT INTO pending_file_deletions (path, created_at) VALUES (?, ?)",
+                    (str(quarantine), now_iso()),
+                )
+                connection.execute(
                     "DELETE FROM projects WHERE id = ? AND user_id = ?",
                     (project_id, user["id"]),
                 )
-            quarantine.unlink(missing_ok=True)
         except Exception as exc:
             if quarantine.exists() and not source.exists():
                 quarantine.replace(source)
             logger.exception("Nie udało się usunąć projektu")
             raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
+        cleanup_pending_files(database)
 
     return app
 

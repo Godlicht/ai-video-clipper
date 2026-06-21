@@ -31,7 +31,7 @@ const apiRequest = async <T>(path: string, options: RequestInit = {}, token?: st
   const response = await fetch(path, { ...options, headers });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ error: "Błąd połączenia z serwerem." }));
-    throw new Error(payload.error ?? "Błąd połączenia z serwerem.");
+    throw new Error(payload.error ?? payload.detail ?? "Błąd połączenia z serwerem.");
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -55,24 +55,16 @@ export const api = {
   listProjects: (token: string) =>
     apiRequest<{ projects: ApiProject[] }>("/api/projects", {}, token),
 
-  createProject: (token: string, file: File, title?: string) => {
+  createProject: (token: string, file: File, title?: string, signal?: AbortSignal) => {
     const form = new FormData();
     form.append("video", file);
     if (title) form.append("title", title);
-    return apiRequest<{ project: ApiProject }>("/api/projects", { method: "POST", body: form }, token);
+    return apiRequest<{ project: ApiProject }>("/api/projects", { method: "POST", body: form, signal }, token);
   },
 
   deleteProject: (token: string, projectId: string) =>
     apiRequest<void>(`/api/projects/${projectId}`, { method: "DELETE" }, token),
 
-  getProjectMedia: async (token: string, projectId: string) => {
-    const response = await fetch(`/api/projects/${projectId}/media`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: "Nie udało się pobrać nagrania." }));
-      throw new Error(payload.error ?? "Nie udało się pobrać nagrania.");
-    }
-    return response.blob();
-  },
+  getProjectMediaUrl: (token: string, projectId: string) =>
+    apiRequest<{ url: string }>(`/api/projects/${projectId}/media-access`, { method: "POST" }, token),
 };

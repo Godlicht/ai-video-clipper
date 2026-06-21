@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS exports (
   created_at TEXT NOT NULL,
   completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS pending_file_deletions (
+  path TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
+);
 """
 
 

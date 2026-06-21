@@ -8,7 +8,7 @@ import { api } from "./api";
 const openDemoResults = async () => {
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole("button", { name: /Zobacz wszystkie/i }));
+  await user.click(screen.getByRole("button", { name: /Otwórz demo/i }));
   return user;
 };
 

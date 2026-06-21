@@ -8,6 +8,7 @@ Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w kr�
 - sesje JWT i prywatne projekty izolowane między użytkownikami,
 - trwały upload plików MP4, MOV i WebM,
 - historia projektów zapisywana w SQLite,
+- strumieniowanie nagrań z historii przez krótkotrwałe podpisane adresy URL i HTTP Range,
 - odczyt długości filmu przez FFprobe,
 - edytor zakresu klipu, ustawienia renderu i eksport manifestu,
 - automatyczne testy frontendu i API.

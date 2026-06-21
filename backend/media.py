@@ -41,28 +41,40 @@ def resolve_media_tool(tool: str, configured: str | None = None) -> str:
 
 
 async def probe_media(file_path: Path, ffprobe_path: str, timeout_seconds: float = 15) -> MediaInfo | None:
-    async with _probe_semaphore:
-        try:
-            process = await asyncio.create_subprocess_exec(
-                ffprobe_path,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration,format_name:stream=codec_type",
-                "-of",
-                "json",
-                str(file_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-        except (OSError, TimeoutError):
-            if "process" in locals() and process.returncode is None:
-                process.kill()
-                await process.wait()
-            return None
+    process: asyncio.subprocess.Process | None = None
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            await _probe_semaphore.acquire()
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    ffprobe_path,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration,format_name:stream=codec_type",
+                    "-of",
+                    "json",
+                    str(file_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _stderr = await process.communicate()
+            finally:
+                _probe_semaphore.release()
+    except TimeoutError:
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return None
+    except asyncio.CancelledError:
+        if process and process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    except OSError:
+        return None
 
-    if process.returncode != 0 or len(stdout) > 1_000_000:
+    if process is None or process.returncode != 0 or len(stdout) > 1_000_000:
         return None
     try:
         payload = json.loads(stdout)
