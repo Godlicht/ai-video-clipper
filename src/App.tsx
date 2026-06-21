@@ -51,6 +51,10 @@ type Clip = {
   accent: string;
 };
 
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const ACCEPTED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".webm"];
+const ACCEPTED_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
+
 const initialClips: Clip[] = [
   {
     id: 1,
@@ -125,6 +129,30 @@ const fmt = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+};
+
+const formatFileSize = (bytes: number) => {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  const gigabytes = bytes / (1024 * 1024 * 1024);
+  if (gigabytes >= 1) return `${gigabytes.toFixed(gigabytes >= 10 ? 0 : 1)} GB`;
+  return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+};
+
+const getFileExtension = (fileName: string) => {
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
+};
+
+const isAcceptedVideoFile = (file: File) => {
+  const extension = getFileExtension(file.name);
+  if (ACCEPTED_VIDEO_MIME_TYPES.has(file.type)) return true;
+  return ACCEPTED_VIDEO_EXTENSIONS.includes(extension) && (!file.type || file.type.startsWith("video/") || file.type === "application/octet-stream");
+};
+
+const validateUploadFile = (file: File) => {
+  if (!isAcceptedVideoFile(file)) return "Obsługujemy tylko pliki MP4, MOV albo WebM.";
+  if (file.size > MAX_UPLOAD_BYTES) return `Ten plik ma ${formatFileSize(file.size)}. Maksymalny rozmiar to 5 GB.`;
+  return undefined;
 };
 
 function Logo() {
@@ -229,14 +257,17 @@ function HomeScreen({
   onFile,
   onDemo,
 }: {
-  onFile: (file: File) => void;
+  onFile: (file: File) => string | undefined;
   onDemo: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [uploadError, setUploadError] = useState<string>();
 
   const accept = (file?: File) => {
-    if (file && file.type.startsWith("video/")) onFile(file);
+    if (!file) return;
+    const validationError = validateUploadFile(file) ?? onFile(file);
+    setUploadError(validationError);
   };
 
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -270,8 +301,11 @@ function HomeScreen({
           <input
             ref={inputRef}
             type="file"
-            accept="video/mp4,video/quicktime,video/webm"
-            onChange={(event: ChangeEvent<HTMLInputElement>) => accept(event.target.files?.[0])}
+            accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm"
+            onChange={(event: ChangeEvent<HTMLInputElement>) => {
+              accept(event.target.files?.[0]);
+              event.currentTarget.value = "";
+            }}
           />
           <div className="upload-icon">
             <UploadCloud size={30} />
@@ -289,6 +323,7 @@ function HomeScreen({
             <i />
             <span>do 3 godzin</span>
           </div>
+          {uploadError && <div className="upload-error" role="alert">{uploadError}</div>}
         </div>
 
         <div className="trust-row">
@@ -836,10 +871,16 @@ export default function App() {
   }, [videoUrl]);
 
   const handleFile = (file: File) => {
-    if (videoUrl) URL.revokeObjectURL(videoUrl);
-    setFileName(file.name);
-    setVideoUrl(URL.createObjectURL(file));
-    setScreen("analysis");
+    try {
+      const nextVideoUrl = URL.createObjectURL(file);
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+      setFileName(file.name);
+      setVideoUrl(nextVideoUrl);
+      setScreen("analysis");
+      return undefined;
+    } catch {
+      return "Nie udało się przygotować podglądu pliku w przeglądarce. Spróbuj wybrać inny plik.";
+    }
   };
 
   const loadDemo = () => {

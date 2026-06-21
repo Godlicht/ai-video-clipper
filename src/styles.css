@@ -92,6 +92,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .download-button { border: 0; color: var(--purple); background: var(--purple-soft); }
 .upload-meta { display: flex; gap: 10px; align-items: center; color: #aaa7b0; font-size: 10px; margin-top: 17px; }
 .upload-meta i { width: 3px; height: 3px; border-radius: 50%; background: #cbc8d0; }
+.upload-error { z-index: 1; margin: 12px 22px 0; color: #a74258; background: #fff0f4; border: 1px solid #f2ccd5; border-radius: 8px; padding: 8px 10px; font-size: 11px; font-weight: 600; text-align: center; }
 .trust-row { display: flex; justify-content: center; gap: 29px; color: #87848e; font-size: 10px; margin: 19px 0 51px; }
 .trust-row div { display: flex; align-items: center; gap: 6px; }
 .trust-row svg { color: #6e54d4; }
