@@ -73,6 +73,38 @@ describe("Cutwise prototype", () => {
     expect(onPlaybackEnd).toHaveBeenCalledOnce();
   });
 
+  it("ignoruje spóźnione odrzucenie poprzedniej próby odtwarzania", async () => {
+    const onPlaybackEnd = vi.fn();
+    let rejectFirstPlay!: (reason?: unknown) => void;
+    let rejectSecondPlay!: (reason?: unknown) => void;
+    const firstPlay = new Promise<void>((_, reject) => {
+      rejectFirstPlay = reject;
+    });
+    const secondPlay = new Promise<void>((_, reject) => {
+      rejectSecondPlay = reject;
+    });
+    vi.spyOn(HTMLMediaElement.prototype, "play")
+      .mockImplementationOnce(() => firstPlay)
+      .mockImplementationOnce(() => secondPlay);
+
+    const { container, rerender } = render(
+      <VideoScene accent="scene-purple" videoUrl="blob:clip" playing={false} onPlaybackEnd={onPlaybackEnd} />,
+    );
+    const video = container.querySelector("video")!;
+    Object.defineProperty(video, "duration", { configurable: true, value: 60 });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+
+    rerender(<VideoScene accent="scene-purple" videoUrl="blob:clip" playing onPlaybackEnd={onPlaybackEnd} />);
+    rerender(<VideoScene accent="scene-purple" videoUrl="blob:clip" playing={false} onPlaybackEnd={onPlaybackEnd} />);
+    rerender(<VideoScene accent="scene-purple" videoUrl="blob:clip" playing onPlaybackEnd={onPlaybackEnd} />);
+
+    await act(async () => rejectFirstPlay(new Error("stara próba")));
+    expect(onPlaybackEnd).not.toHaveBeenCalled();
+
+    await act(async () => rejectSecondPlay(new Error("aktualna próba")));
+    expect(onPlaybackEnd).toHaveBeenCalledOnce();
+  });
+
   it("odrzuca nieobsługiwany typ pliku z czytelnym komunikatem", () => {
     render(<App />);
     const input = document.querySelector<HTMLInputElement>('input[type="file"]');

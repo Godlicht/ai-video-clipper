@@ -606,6 +606,7 @@ export function VideoScene({
   const videoRef = useRef<HTMLVideoElement>(null);
   const onPlaybackEndRef = useRef(onPlaybackEnd);
   const onProgressRef = useRef(onProgress);
+  const playbackGenerationRef = useRef(0);
 
   useEffect(() => {
     onPlaybackEndRef.current = onPlaybackEnd;
@@ -623,6 +624,7 @@ export function VideoScene({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    const playbackGeneration = ++playbackGenerationRef.current;
 
     if (!playing) {
       video.pause();
@@ -631,7 +633,9 @@ export function VideoScene({
 
     const safeEnd = Math.min(end ?? video.duration, video.duration || end || Number.POSITIVE_INFINITY);
     if (video.currentTime < start || video.currentTime >= safeEnd) video.currentTime = start;
-    void video.play().catch(() => onPlaybackEndRef.current?.());
+    void video.play().catch(() => {
+      if (playbackGeneration === playbackGenerationRef.current) onPlaybackEndRef.current?.();
+    });
   }, [end, playing, start, videoUrl]);
 
   const keepInsideRange = () => {
