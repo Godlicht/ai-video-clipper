@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS pending_file_deletions (
   quarantine_path TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pending_export_deletions (
+  path TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
+);
 """
 
 

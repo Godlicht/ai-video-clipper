@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend.config import Settings
 from backend.db import Database
-from backend.main import cleanup_pending_files, create_app
+from backend.main import cleanup_pending_exports, cleanup_pending_files, create_app
 from backend.media import MediaInfo
 
 
@@ -393,8 +393,16 @@ def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path, monkeypat
         assert response.status_code == 500
         with database.connection() as connection:
             export = connection.execute("SELECT status, error_message FROM exports").fetchone()
+            pending = connection.execute("SELECT path FROM pending_export_deletions").fetchone()
         assert export["status"] == "failed"
         assert "unexpected" in export["error_message"]
+        assert pending is not None
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    cleanup_pending_exports(database)
+    with database.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending_export_deletions").fetchone()[0] == 0
+    assert not Path(pending["path"]).exists()
     database.close()
 
 

@@ -137,6 +137,20 @@ def cleanup_pending_files(database: Database) -> None:
             )
 
 
+def cleanup_pending_exports(database: Database) -> None:
+    with database.connection() as connection:
+        rows = connection.execute("SELECT path FROM pending_export_deletions").fetchall()
+    for row in rows:
+        path = Path(row["path"])
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Nie udało się jeszcze usunąć eksportu %s", path)
+            continue
+        with database.connection() as connection:
+            connection.execute("DELETE FROM pending_export_deletions WHERE path = ?", (str(path),))
+
+
 def create_app(
     app_settings: Settings | None = None,
     database: Database | None = None,
@@ -148,6 +162,7 @@ def create_app(
     app_settings.export_dir.mkdir(parents=True, exist_ok=True)
     database = database or Database(app_settings.database_path)
     cleanup_pending_files(database)
+    cleanup_pending_exports(database)
     current_user = auth_dependency(database, app_settings)
     ffprobe_path = resolve_media_tool("ffprobe", app_settings.ffprobe_path)
     ffmpeg_path = resolve_media_tool("ffmpeg", app_settings.ffmpeg_path)
@@ -470,6 +485,7 @@ def create_app(
         payload: ExportRequest,
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
+        cleanup_pending_exports(database)
         with database.connection() as connection:
             owner = connection.execute(
                 """
@@ -537,6 +553,14 @@ def create_app(
                     output.unlink(missing_ok=True)
                 except OSError:
                     logger.warning("Nie udało się usunąć częściowego eksportu %s", output)
+                    with database.connection() as connection:
+                        connection.execute(
+                            """
+                            INSERT OR REPLACE INTO pending_export_deletions (path, created_at)
+                            VALUES (?, ?)
+                            """,
+                            (str(output), now_iso()),
+                        )
                 logger.exception("Nie udało się wyrenderować klipu")
                 raise HTTPException(status_code=500, detail="Nie udało się wyrenderować klipu.") from exc
             with database.connection() as connection:
