@@ -35,6 +35,14 @@ import {
 
 type Screen = "home" | "analysis" | "results";
 type Ratio = "9:16" | "1:1" | "16:9";
+type Quality = "720p" | "1080p" | "4K";
+
+type RenderConfig = {
+  ratio: Ratio;
+  quality: Quality;
+  captionsEnabled: boolean;
+  trackingEnabled: boolean;
+};
 
 type Clip = {
   id: number;
@@ -49,6 +57,7 @@ type Clip = {
   transcript: string;
   selected: boolean;
   accent: string;
+  renderConfig: RenderConfig;
 };
 
 const initialClips: Clip[] = [
@@ -66,6 +75,7 @@ const initialClips: Clip[] = [
       "Największy błąd? Przez trzy miesiące budowaliśmy funkcję, której nikt nie potrzebował. Dopiero jedna rozmowa z klientem sprawiła, że wszystko stało się oczywiste.",
     selected: true,
     accent: "scene-purple",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
   },
   {
     id: 2,
@@ -81,6 +91,7 @@ const initialClips: Clip[] = [
       "Zapytałem: za co naprawdę płacisz? Nie za więcej funkcji. Za spokój, że praca zostanie wykonana na czas. To jedno pytanie zmieniło naszą strategię.",
     selected: true,
     accent: "scene-blue",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
   },
   {
     id: 3,
@@ -96,6 +107,7 @@ const initialClips: Clip[] = [
       "I wtedy zobaczyliśmy pierwszy raport. Wynik był dwa razy lepszy, niż zakładaliśmy. W pokoju zapadła cisza, a potem wszyscy zaczęli się śmiać.",
     selected: false,
     accent: "scene-orange",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
   },
   {
     id: 4,
@@ -111,6 +123,7 @@ const initialClips: Clip[] = [
       "Dobry produkt nie zmusza użytkownika, żeby nauczył się waszej logiki. To produkt powinien nauczyć się logiki użytkownika.",
     selected: false,
     accent: "scene-green",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
   },
 ];
 
@@ -133,7 +146,7 @@ const MAX_VIDEO_DURATION = 3 * 60 * 60;
 const SUPPORTED_VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 const SUPPORTED_VIDEO_EXTENSIONS = /\.(mp4|mov|webm)$/i;
 
-const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip }));
+const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } }));
 
 const clipsForDuration = (duration = DEMO_DURATION) => {
   if (!Number.isFinite(duration) || duration <= 0) return cloneInitialClips();
@@ -142,7 +155,7 @@ const clipsForDuration = (duration = DEMO_DURATION) => {
   return initialClips.map((clip) => {
     const start = Math.max(0, Math.min(Math.round(clip.start * scale), Math.max(0, duration - 5)));
     const end = Math.min(duration, Math.max(start + Math.min(5, duration), Math.round(clip.end * scale)));
-    return { ...clip, start, end };
+    return { ...clip, start, end, renderConfig: { ...clip.renderConfig } };
   });
 };
 
@@ -181,6 +194,67 @@ const readVideoDuration = (url: string) =>
     video.src = url;
   });
 
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function useDialogFocus(onClose: () => void, escapeDisabled = false) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const escapeDisabledRef = useRef(escapeDisabled);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    escapeDisabledRef.current = escapeDisabled;
+  }, [escapeDisabled, onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const firstFocusable = dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    (firstFocusable ?? dialog)?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !escapeDisabledRef.current) {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, []);
+
+  return dialogRef;
+}
+
 function Logo() {
   return (
     <div className="logo-wrap">
@@ -196,10 +270,12 @@ function Sidebar({
   screen,
   onNavigate,
   onNewProject,
+  clipCount,
 }: {
   screen: Screen;
   onNavigate: (screen: Screen) => void;
   onNewProject: () => void;
+  clipCount: number;
 }) {
   return (
     <aside className="sidebar">
@@ -218,7 +294,7 @@ function Sidebar({
         <button className={screen === "results" ? "active" : ""} onClick={() => onNavigate("results")}>
           <Film size={18} />
           Moje klipy
-          <span className="nav-count">4</span>
+          <span className="nav-count">{clipCount}</span>
         </button>
         <button>
           <FolderClock size={18} />
@@ -294,7 +370,7 @@ function HomeScreen({
   const [preparing, setPreparing] = useState(false);
 
   const accept = async (file?: File) => {
-    if (!file) return;
+    if (!file || preparing) return;
     const validationError = validateVideoFile(file);
     if (validationError) {
       setUploadError(validationError);
@@ -339,6 +415,7 @@ function HomeScreen({
           <input
             ref={inputRef}
             type="file"
+            disabled={preparing}
             accept="video/mp4,video/quicktime,video/webm"
             onChange={(event: ChangeEvent<HTMLInputElement>) => accept(event.target.files?.[0])}
           />
@@ -347,7 +424,7 @@ function HomeScreen({
           </div>
           <h3>Przeciągnij tutaj swój film</h3>
           <p>lub wybierz plik z komputera</p>
-          <button className="primary-button" onClick={() => inputRef.current?.click()}>
+          <button className="primary-button" disabled={preparing} onClick={() => inputRef.current?.click()}>
             {preparing ? <LoaderCircle size={17} className="spin" /> : <UploadCloud size={17} />}
             {preparing ? "Sprawdzanie pliku…" : "Wybierz plik"}
           </button>
@@ -504,7 +581,7 @@ function AnalysisScreen({
   );
 }
 
-function VideoScene({
+export function VideoScene({
   accent,
   ratio = "16:9",
   videoUrl,
@@ -528,6 +605,21 @@ function VideoScene({
   onProgress?: (currentTime: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const onPlaybackEndRef = useRef(onPlaybackEnd);
+  const onProgressRef = useRef(onProgress);
+
+  useEffect(() => {
+    onPlaybackEndRef.current = onPlaybackEnd;
+    onProgressRef.current = onProgress;
+  }, [onPlaybackEnd, onProgress]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 1) return;
+    const safeStart = Math.min(start, Math.max(0, video.duration - 0.1));
+    video.currentTime = safeStart;
+    onProgressRef.current?.(safeStart);
+  }, [end, start, videoUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -540,18 +632,18 @@ function VideoScene({
 
     const safeEnd = Math.min(end ?? video.duration, video.duration || end || Number.POSITIVE_INFINITY);
     if (video.currentTime < start || video.currentTime >= safeEnd) video.currentTime = start;
-    void video.play().catch(() => onPlaybackEnd?.());
-  }, [end, onPlaybackEnd, playing, start, videoUrl]);
+    void video.play().catch(() => onPlaybackEndRef.current?.());
+  }, [end, playing, start, videoUrl]);
 
   const keepInsideRange = () => {
     const video = videoRef.current;
     if (!video) return;
-    onProgress?.(video.currentTime);
+    onProgressRef.current?.(video.currentTime);
     if (end === undefined || video.currentTime < end) return;
     video.pause();
     video.currentTime = start;
-    onProgress?.(start);
-    onPlaybackEnd?.();
+    onProgressRef.current?.(start);
+    onPlaybackEndRef.current?.();
   };
 
   return (
@@ -565,7 +657,7 @@ function VideoScene({
             event.currentTarget.currentTime = Math.min(start, Math.max(0, event.currentTarget.duration - 0.1));
           }}
           onTimeUpdate={keepInsideRange}
-          onEnded={onPlaybackEnd}
+          onEnded={() => onPlaybackEndRef.current?.()}
         />
       ) : (
         <>
@@ -598,14 +690,19 @@ function ClipCard({
   onEdit,
   onToggle,
   onExport,
+  playing,
+  onTogglePlayback,
+  onPlaybackEnd,
 }: {
   clip: Clip;
   videoUrl?: string;
   onEdit: () => void;
   onToggle: () => void;
   onExport: () => void;
+  playing: boolean;
+  onTogglePlayback: () => void;
+  onPlaybackEnd: () => void;
 }) {
-  const [playing, setPlaying] = useState(false);
   return (
     <article className={`clip-card ${clip.selected ? "selected" : ""}`}>
       <button className="select-check" onClick={onToggle} aria-label="Wybierz klip">
@@ -618,8 +715,8 @@ function ClipCard({
           playing={playing}
           start={clip.start}
           end={clip.end}
-          onToggle={() => setPlaying(!playing)}
-          onPlaybackEnd={() => setPlaying(false)}
+          onToggle={onTogglePlayback}
+          onPlaybackEnd={onPlaybackEnd}
         />
         <span className="clip-time"><Clock3 size={12} /> {fmt(clip.end - clip.start)}</span>
       </div>
@@ -667,6 +764,7 @@ function ResultsScreen({
   const [editorClip, setEditorClip] = useState<Clip | null>(null);
   const [exportClips, setExportClips] = useState<Clip[] | null>(null);
   const [clipView, setClipView] = useState<"all" | "score" | "short" | "selected">("all");
+  const [activePlaybackId, setActivePlaybackId] = useState<number | null>(null);
   const selectedCount = clips.filter((clip) => clip.selected).length;
   const totalClipDuration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
   const averageScore = Math.round(clips.reduce((total, clip) => total + clip.score, 0) / Math.max(1, clips.length));
@@ -677,6 +775,22 @@ function ResultsScreen({
     if (clipView === "selected") return clips.filter((clip) => clip.selected);
     return clips;
   }, [clipView, clips]);
+
+  useEffect(() => {
+    if (activePlaybackId !== null && !visibleClips.some((clip) => clip.id === activePlaybackId)) {
+      setActivePlaybackId(null);
+    }
+  }, [activePlaybackId, visibleClips]);
+
+  const openEditor = (clip: Clip) => {
+    setActivePlaybackId(null);
+    setEditorClip(clip);
+  };
+
+  const openExport = (nextClips: Clip[]) => {
+    setActivePlaybackId(null);
+    setExportClips(nextClips);
+  };
 
   return (
     <main className="content">
@@ -708,7 +822,7 @@ function ResultsScreen({
           </div>
           <div className="toolbar-actions">
             <button className="secondary-button" onClick={onRegenerate}><RefreshCw size={15} /> Generuj ponownie</button>
-            <button className="primary-button" disabled={!selectedCount} onClick={() => setExportClips(clips.filter((clip) => clip.selected))}>
+            <button className="primary-button" disabled={!selectedCount} onClick={() => openExport(clips.filter((clip) => clip.selected))}>
               Eksportuj wybrane <span>{selectedCount}</span>
             </button>
           </div>
@@ -727,9 +841,12 @@ function ResultsScreen({
               key={clip.id}
               clip={clip}
               videoUrl={videoUrl}
-              onEdit={() => setEditorClip(clip)}
+              playing={activePlaybackId === clip.id}
+              onTogglePlayback={() => setActivePlaybackId(activePlaybackId === clip.id ? null : clip.id)}
+              onPlaybackEnd={() => setActivePlaybackId(null)}
+              onEdit={() => openEditor(clip)}
               onToggle={() => onClipsChange(clips.map((item) => item.id === clip.id ? { ...item, selected: !item.selected } : item))}
-              onExport={() => setExportClips([clip])}
+              onExport={() => openExport([clip])}
             />
           ))}
           {!visibleClips.length && <p className="empty-clips">Nie masz jeszcze wybranych klipów.</p>}
@@ -745,7 +862,7 @@ function ResultsScreen({
           onSave={(updated, exportAfterSave) => {
             onClipsChange(clips.map((clip) => clip.id === updated.id ? updated : clip));
             setEditorClip(null);
-            if (exportAfterSave) setExportClips([updated]);
+            if (exportAfterSave) openExport([updated]);
           }}
         />
       )}
@@ -775,24 +892,15 @@ function EditorModal({
   onClose: () => void;
   onSave: (clip: Clip, exportAfterSave: boolean) => void;
 }) {
-  const [draftClip, setDraftClip] = useState({ ...clip });
+  const [draftClip, setDraftClip] = useState({ ...clip, renderConfig: { ...clip.renderConfig } });
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(clip.start);
-  const [ratio, setRatio] = useState<Ratio>("9:16");
-  const [captionsEnabled, setCaptionsEnabled] = useState(true);
-  const [trackingEnabled, setTrackingEnabled] = useState(true);
   const duration = draftClip.end - draftClip.start;
   const waveform = useMemo(() => Array.from({ length: 90 }, (_, i) => 16 + ((i * 17 + clip.id * 23) % 46)), [clip.id]);
   const progress = Math.max(0, Math.min(100, ((currentTime - draftClip.start) / Math.max(1, duration)) * 100));
   const minClipLength = Math.min(5, maxDuration);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  const { ratio, captionsEnabled, trackingEnabled } = draftClip.renderConfig;
+  const dialogRef = useDialogFocus(onClose);
 
   const setStart = (value: number) => {
     const nextStart = Math.max(0, Math.min(value, draftClip.end - minClipLength));
@@ -803,10 +911,13 @@ function EditorModal({
     const nextEnd = Math.min(maxDuration, Math.max(value, draftClip.start + minClipLength));
     setDraftClip({ ...draftClip, end: nextEnd });
   };
+  const updateRenderConfig = (patch: Partial<RenderConfig>) => {
+    setDraftClip({ ...draftClip, renderConfig: { ...draftClip.renderConfig, ...patch } });
+  };
 
   return (
     <div className="modal-backdrop">
-      <div className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+      <div ref={dialogRef} className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title" tabIndex={-1}>
         <header className="modal-header">
           <div>
             <span className="eyebrow"><Scissors size={14} /> EDYTOR KLIPU</span>
@@ -833,7 +944,7 @@ function EditorModal({
               <button onClick={() => setPlaying(!playing)} aria-label={playing ? "Wstrzymaj podgląd" : "Odtwórz podgląd"}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
               <span>{fmt(currentTime)} / {fmt(draftClip.end)}</span>
               <div className="playback-track"><span style={{ width: `${progress}%` }} /></div>
-              <button onClick={() => setCaptionsEnabled(!captionsEnabled)} aria-label="Przełącz napisy" className={captionsEnabled ? "active" : ""}><Subtitles size={17} /></button>
+              <button onClick={() => updateRenderConfig({ captionsEnabled: !captionsEnabled })} aria-label="Przełącz napisy" className={captionsEnabled ? "active" : ""}><Subtitles size={17} /></button>
               <button disabled title="Tryb pełnoekranowy pojawi się w kolejnej wersji" aria-label="Tryb pełnoekranowy niedostępny"><Square size={16} /></button>
             </div>
           </div>
@@ -841,19 +952,19 @@ function EditorModal({
             <div className="settings-section">
               <span className="settings-label">FORMAT KLIPU</span>
               <div className="ratio-options">
-                <button className={ratio === "9:16" ? "active" : ""} onClick={() => setRatio("9:16")}><span className="portrait-shape" />9:16<small>Reels, TikTok</small></button>
-                <button className={ratio === "1:1" ? "active" : ""} onClick={() => setRatio("1:1")}><span className="square-shape" />1:1<small>Instagram</small></button>
-                <button className={ratio === "16:9" ? "active" : ""} onClick={() => setRatio("16:9")}><span className="wide-shape" />16:9<small>YouTube</small></button>
+                <button className={ratio === "9:16" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "9:16" })}><span className="portrait-shape" />9:16<small>Reels, TikTok</small></button>
+                <button className={ratio === "1:1" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "1:1" })}><span className="square-shape" />1:1<small>Instagram</small></button>
+                <button className={ratio === "16:9" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "16:9" })}><span className="wide-shape" />16:9<small>YouTube</small></button>
               </div>
             </div>
             <div className="settings-section">
               <div className="toggle-row">
                 <div><Subtitles size={17} /><span><strong>Automatyczne napisy</strong><small>Dynamiczne wyróżnianie słów</small></span></div>
-                <button className={`toggle ${captionsEnabled ? "active" : ""}`} onClick={() => setCaptionsEnabled(!captionsEnabled)} aria-label="Przełącz automatyczne napisy"><span /></button>
+                <button className={`toggle ${captionsEnabled ? "active" : ""}`} onClick={() => updateRenderConfig({ captionsEnabled: !captionsEnabled })} aria-label="Przełącz automatyczne napisy"><span /></button>
               </div>
               <div className="toggle-row">
                 <div><AlignCenter size={17} /><span><strong>Śledzenie twarzy</strong><small>Główna osoba w centrum</small></span></div>
-                <button className={`toggle ${trackingEnabled ? "active" : ""}`} onClick={() => setTrackingEnabled(!trackingEnabled)} aria-label="Przełącz śledzenie twarzy"><span /></button>
+                <button className={`toggle ${trackingEnabled ? "active" : ""}`} onClick={() => updateRenderConfig({ trackingEnabled: !trackingEnabled })} aria-label="Przełącz śledzenie twarzy"><span /></button>
               </div>
             </div>
             <div className="settings-section transcript-section">
@@ -871,7 +982,7 @@ function EditorModal({
               <span>{fmt(draftClip.start)} — {fmt(draftClip.end)} · {fmt(duration)}</span>
             </div>
             <button onClick={() => {
-              setDraftClip({ ...clip });
+              setDraftClip({ ...clip, renderConfig: { ...clip.renderConfig } });
               setCurrentTime(clip.start);
               setPlaying(false);
             }}><RotateCcw size={14} /> Przywróć</button>
@@ -913,20 +1024,13 @@ function ExportModal({
   videoUrl?: string;
   onClose: () => void;
 }) {
-  const [ratio, setRatio] = useState<Ratio>("9:16");
-  const [quality, setQuality] = useState("1080p");
+  const firstClip = clips[0];
+  const [ratio, setRatio] = useState<Ratio>(firstClip.renderConfig.ratio);
+  const [quality, setQuality] = useState<Quality>(firstClip.renderConfig.quality);
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
   const exportTimerRef = useRef<number | undefined>(undefined);
-  const firstClip = clips[0];
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !exporting) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [exporting, onClose]);
+  const dialogRef = useDialogFocus(onClose, exporting);
 
   useEffect(() => () => {
     if (exportTimerRef.current) window.clearTimeout(exportTimerRef.current);
@@ -950,6 +1054,12 @@ function ExportModal({
         id: clip.id,
         title: clip.title,
         source_range: { start: clip.start, end: clip.end },
+        render_config: {
+          ratio,
+          quality,
+          captions_enabled: clip.renderConfig.captionsEnabled,
+          tracking_enabled: clip.renderConfig.trackingEnabled,
+        },
       })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -967,7 +1077,7 @@ function ExportModal({
 
   return (
     <div className="modal-backdrop">
-      <div className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title">
+      <div ref={dialogRef} className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1}>
         <header className="modal-header">
           <div><span className="eyebrow"><Download size={14} /> EKSPORT</span><h2 id="export-title">Przygotuj {clips.length === 1 ? "klip" : `${clips.length} klipy`} do publikacji</h2></div>
           <button className="icon-button" onClick={onClose} aria-label="Zamknij eksport"><X size={20} /></button>
@@ -1000,7 +1110,7 @@ function ExportModal({
                 </div>
                 <label>Jakość wideo</label>
                 <div className="quality-row">
-                  {["720p", "1080p", "4K"].map((item) => <button key={item} className={quality === item ? "active" : ""} onClick={() => setQuality(item)}>{item}{item === "1080p" && <span>Polecane</span>}</button>)}
+                  {(["720p", "1080p", "4K"] as Quality[]).map((item) => <button key={item} className={quality === item ? "active" : ""} onClick={() => setQuality(item)}>{item}{item === "1080p" && <span>Polecane</span>}</button>)}
                 </div>
                 <div className="export-detail"><span>Format</span><strong>MP4 · H.264</strong></div>
                 <div className="export-detail"><span>Szacowany rozmiar</span><strong>~ {42 * clips.length} MB</strong></div>
@@ -1035,6 +1145,7 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string>();
   const [videoDuration, setVideoDuration] = useState(DEMO_DURATION);
   const [mobileMenu, setMobileMenu] = useState(false);
+  const uploadGenerationRef = useRef(0);
 
   useEffect(() => () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
@@ -1044,13 +1155,20 @@ export default function App() {
     const validationError = validateVideoFile(file);
     if (validationError) return validationError;
 
+    const uploadGeneration = ++uploadGenerationRef.current;
     const nextVideoUrl = URL.createObjectURL(file);
     let duration: number;
     try {
       duration = await readVideoDuration(nextVideoUrl);
     } catch (error) {
       URL.revokeObjectURL(nextVideoUrl);
+      if (uploadGeneration !== uploadGenerationRef.current) return undefined;
       return error instanceof Error ? error.message : "Nie udało się przygotować filmu.";
+    }
+
+    if (uploadGeneration !== uploadGenerationRef.current) {
+      URL.revokeObjectURL(nextVideoUrl);
+      return undefined;
     }
 
     if (duration > MAX_VIDEO_DURATION) {
@@ -1067,6 +1185,7 @@ export default function App() {
   };
 
   const loadDemo = () => {
+    uploadGenerationRef.current += 1;
     setVideoUrl(undefined);
     setVideoDuration(DEMO_DURATION);
     setClips(cloneInitialClips());
@@ -1074,10 +1193,11 @@ export default function App() {
     setScreen("results");
   };
 
-  const startNewProject = () => {
+  const resetProject = () => {
+    uploadGenerationRef.current += 1;
     setVideoUrl(undefined);
-    setVideoDuration(DEMO_DURATION);
-    setClips(cloneInitialClips());
+    setVideoDuration(0);
+    setClips([]);
     setFileName("Nowy projekt.mp4");
     setMobileMenu(false);
     setScreen("home");
@@ -1088,17 +1208,17 @@ export default function App() {
       <button className="mobile-menu-button" onClick={() => setMobileMenu(!mobileMenu)} aria-label="Otwórz menu"><Menu size={20} /></button>
       <div className={mobileMenu ? "sidebar-mobile open" : "sidebar-mobile"} onClick={() => setMobileMenu(false)}>
         <div onClick={(event) => event.stopPropagation()}>
-          <Sidebar screen={screen} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} onNewProject={startNewProject} />
+          <Sidebar screen={screen} clipCount={clips.length} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} onNewProject={resetProject} />
         </div>
       </div>
-      <Sidebar screen={screen} onNavigate={setScreen} onNewProject={startNewProject} />
+      <Sidebar screen={screen} clipCount={clips.length} onNavigate={setScreen} onNewProject={resetProject} />
       {screen === "home" && <HomeScreen onFile={handleFile} onDemo={loadDemo} />}
       {screen === "analysis" && (
         <AnalysisScreen
           fileName={fileName}
           videoUrl={videoUrl}
           onComplete={() => setScreen("results")}
-          onCancel={() => setScreen("home")}
+          onCancel={resetProject}
         />
       )}
       {screen === "results" && (
