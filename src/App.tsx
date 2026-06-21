@@ -32,7 +32,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { api, type ApiProject, type ApiUser } from "./api";
+import { api, type ApiClip, type ApiProject, type ApiUser } from "./api";
 
 type Screen = "home" | "analysis" | "results";
 type Ratio = "9:16" | "1:1" | "16:9";
@@ -46,7 +46,8 @@ type RenderConfig = {
 };
 
 type Clip = {
-  id: number;
+  id: string | number;
+  projectId?: string;
   title: string;
   description: string;
   reason: string;
@@ -158,6 +159,13 @@ const clipsForDuration = (duration = DEMO_DURATION) => {
     return { ...clip, start, end, renderConfig: { ...clip.renderConfig } };
   });
 };
+
+const decorateApiClips = (clips: ApiClip[]): Clip[] => clips.map((clip, index) => ({
+  ...clip,
+  tag: index === 0 ? "Najwyższy potencjał" : "Propozycja",
+  tagTone: (["pink", "blue", "amber", "green"] as const)[index % 4],
+  accent: ["scene-purple", "scene-blue", "scene-orange", "scene-green"][index % 4],
+}));
 
 const validateVideoFile = (file: File) => {
   if (!SUPPORTED_VIDEO_EXTENSIONS.test(file.name)) return "Wybierz plik MP4, MOV lub WebM.";
@@ -569,20 +577,30 @@ export function AnalysisScreen({
   videoUrl,
   onComplete,
   onCancel,
+  ready = true,
+  error,
 }: {
   fileName: string;
   videoUrl?: string;
   onComplete: () => void;
   onCancel: () => void;
+  ready?: boolean;
+  error?: string;
 }) {
   const [progress, setProgress] = useState(8);
+  const previousReady = useRef(ready);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setProgress((current) => Math.min(100, current + (current < 55 ? 4 : 2)));
+      setProgress((current) => Math.min(ready ? 100 : 94, current + (current < 55 ? 4 : 2)));
     }, 220);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [ready]);
+
+  useEffect(() => {
+    if (!previousReady.current && ready) setProgress(100);
+    previousReady.current = ready;
+  }, [ready]);
 
   useEffect(() => {
     if (progress < 100) return;
@@ -636,7 +654,8 @@ export function AnalysisScreen({
               <Info size={17} />
               <p>Możesz bezpiecznie zamknąć tę kartę. Powiadomimy Cię, gdy klipy będą gotowe.</p>
             </div>
-            <button className="text-button danger" onClick={onCancel}>Anuluj analizę</button>
+            {error && <p className="upload-error" role="alert">{error}</p>}
+            <button className="text-button danger" onClick={onCancel}>{error ? "Wróć" : "Anuluj analizę"}</button>
           </div>
         </div>
       </section>
@@ -819,6 +838,7 @@ function ResultsScreen({
   onClipsChange,
   onHome,
   onRegenerate,
+  onExport,
 }: {
   clips: Clip[];
   fileName: string;
@@ -827,11 +847,12 @@ function ResultsScreen({
   onClipsChange: (clips: Clip[]) => void;
   onHome: () => void;
   onRegenerate: () => void;
+  onExport?: (clips: Clip[]) => Promise<void>;
 }) {
   const [editorClip, setEditorClip] = useState<Clip | null>(null);
   const [exportClips, setExportClips] = useState<Clip[] | null>(null);
   const [clipView, setClipView] = useState<"all" | "score" | "short" | "selected">("all");
-  const [activePlaybackId, setActivePlaybackId] = useState<number | null>(null);
+  const [activePlaybackId, setActivePlaybackId] = useState<string | number | null>(null);
   const selectedCount = clips.filter((clip) => clip.selected).length;
   const totalClipDuration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
   const averageScore = Math.round(clips.reduce((total, clip) => total + clip.score, 0) / Math.max(1, clips.length));
@@ -938,6 +959,7 @@ function ResultsScreen({
           clips={exportClips}
           videoUrl={videoUrl}
           onClose={() => setExportClips(null)}
+          onExport={onExport}
           onConfigsChange={(updatedClips) => {
             const updates = new Map(updatedClips.map((clip) => [clip.id, clip]));
             onClipsChange(clips.map((clip) => updates.get(clip.id) ?? clip));
@@ -973,7 +995,10 @@ function EditorModal({
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(clip.start);
   const duration = draftClip.end - draftClip.start;
-  const waveform = useMemo(() => Array.from({ length: 90 }, (_, i) => 16 + ((i * 17 + clip.id * 23) % 46)), [clip.id]);
+  const waveform = useMemo(() => {
+    const seed = String(clip.id).split("").reduce((total, character) => total + character.charCodeAt(0), 0);
+    return Array.from({ length: 90 }, (_, i) => 16 + ((i * 17 + seed * 23) % 46));
+  }, [clip.id]);
   const progress = Math.max(0, Math.min(100, ((currentTime - draftClip.start) / Math.max(1, duration)) * 100));
   const minClipLength = Math.min(5, maxDuration);
   const { ratio, captionsEnabled, trackingEnabled } = draftClip.renderConfig;
@@ -1097,17 +1122,20 @@ function ExportModal({
   videoUrl,
   onClose,
   onConfigsChange,
+  onExport,
 }: {
   clips: Clip[];
   videoUrl?: string;
   onClose: () => void;
   onConfigsChange: (clips: Clip[]) => void;
+  onExport?: (clips: Clip[]) => Promise<void>;
 }) {
   const [configuredClips, setConfiguredClips] = useState(() =>
     clips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } })),
   );
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
+  const [exportError, setExportError] = useState<string>();
   const exportTimerRef = useRef<number | undefined>(undefined);
   const dialogRef = useDialogFocus(onClose, exporting);
   const firstClip = configuredClips[0];
@@ -1127,9 +1155,21 @@ function ExportModal({
     dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
   }, [dialogRef, done]);
 
-  const exportVideo = () => {
+  const exportVideo = async () => {
     onConfigsChange(configuredClips);
     setExporting(true);
+    setExportError(undefined);
+    if (onExport) {
+      try {
+        await onExport(configuredClips);
+        setDone(true);
+      } catch (error) {
+        setExportError(error instanceof Error ? error.message : "Nie udało się wyrenderować klipu.");
+      } finally {
+        setExporting(false);
+      }
+      return;
+    }
     exportTimerRef.current = window.setTimeout(() => {
       setExporting(false);
       setDone(true);
@@ -1225,6 +1265,7 @@ function ExportModal({
               </div>
             </div>
             <footer className="modal-footer">
+              {exportError && <p className="upload-error" role="alert">{exportError}</p>}
               <button className="secondary-button" onClick={onClose}>Anuluj</button>
               <button className="primary-button" onClick={exportVideo} disabled={exporting}>
                 {exporting ? <><LoaderCircle size={17} className="spin" /> Renderowanie…</> : <><Download size={17} /> Eksportuj {configuredClips.length === 1 ? "klip" : `${configuredClips.length} klipy`}</>}
@@ -1236,8 +1277,8 @@ function ExportModal({
             <div className="success-mark"><Check size={34} /></div>
             <span className="eyebrow">{configuredClips.length === 1 ? "KLIP GOTOWY" : "KLIPY GOTOWE"}</span>
             <h2>Świetnie wygląda!</h2>
-            <p>W produkcyjnej wersji wyrenderowany plik MP4 będzie gotowy do pobrania. Ten prototyp pobiera manifest eksportu.</p>
-            <button className="primary-button" onClick={downloadManifest}><Download size={17} /> Pobierz manifest</button>
+            <p>{onExport ? "Wyrenderowany plik MP4 został pobrany na urządzenie." : "Wersja demonstracyjna przygotowała manifest eksportu."}</p>
+            {!onExport && <button className="primary-button" onClick={downloadManifest}><Download size={17} /> Pobierz manifest</button>}
             <button className="text-button" onClick={onClose}>Wróć do klipów</button>
           </div>
         )}
@@ -1259,6 +1300,9 @@ export default function App() {
   const [fileName, setFileName] = useState("Jak zbudować produkt, którego ludzie chcą.mp4");
   const [videoUrl, setVideoUrl] = useState<string>();
   const [videoDuration, setVideoDuration] = useState(DEMO_DURATION);
+  const [activeProjectId, setActiveProjectId] = useState<string>();
+  const [analysisReady, setAnalysisReady] = useState(true);
+  const [analysisError, setAnalysisError] = useState<string>();
   const [mobileMenu, setMobileMenu] = useState(false);
   const uploadGenerationRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -1366,9 +1410,25 @@ export default function App() {
     setProjects((current) => [persistedProject, ...current.filter((project) => project.id !== persistedProject.id)]);
     setFileName(file.name);
     setVideoDuration(duration);
-    setClips(clipsForDuration(duration));
+    setActiveProjectId(persistedProject.id);
+    setClips([]);
     setVideoUrl(nextVideoUrl);
+    setAnalysisReady(false);
+    setAnalysisError(undefined);
     setScreen("analysis");
+    void api.analyzeProject(activeToken, persistedProject.id)
+      .then((response) => {
+        if (uploadGeneration !== uploadGenerationRef.current) return;
+        setClips(decorateApiClips(response.clips));
+        setProjects((current) => current.map((project) => (
+          project.id === persistedProject.id ? { ...project, status: "ready" } : project
+        )));
+        setAnalysisReady(true);
+      })
+      .catch((error) => {
+        if (uploadGeneration !== uploadGenerationRef.current) return;
+        setAnalysisError(error instanceof Error ? error.message : "Nie udało się przeanalizować nagrania.");
+      });
     return undefined;
   };
 
@@ -1378,6 +1438,9 @@ export default function App() {
     uploadAbortRef.current = null;
     setVideoUrl(undefined);
     setVideoDuration(DEMO_DURATION);
+    setActiveProjectId(undefined);
+    setAnalysisReady(true);
+    setAnalysisError(undefined);
     setClips(cloneInitialClips());
     setFileName("Jak zbudować produkt, którego ludzie chcą.mp4");
     setScreen("results");
@@ -1389,6 +1452,9 @@ export default function App() {
     uploadAbortRef.current = null;
     setVideoUrl(undefined);
     setVideoDuration(0);
+    setActiveProjectId(undefined);
+    setAnalysisReady(true);
+    setAnalysisError(undefined);
     setClips([]);
     setFileName("Nowy projekt.mp4");
     setMobileMenu(false);
@@ -1401,11 +1467,23 @@ export default function App() {
       const media = await api.getProjectMediaUrl(token, project.id);
       const nextVideoUrl = media.url;
       const duration = project.durationSeconds ?? await readVideoDuration(nextVideoUrl);
+      const storedClips = await api.listClips(token, project.id);
       setFileName(project.sourceFilename);
       setVideoDuration(duration);
-      setClips(clipsForDuration(duration));
+      setActiveProjectId(project.id);
       setVideoUrl(nextVideoUrl);
-      setScreen("results");
+      if (storedClips.clips.length) {
+        setClips(decorateApiClips(storedClips.clips));
+        setScreen("results");
+      } else {
+        setClips([]);
+        setAnalysisReady(false);
+        setAnalysisError(undefined);
+        setScreen("analysis");
+        const analyzed = await api.analyzeProject(token, project.id);
+        setClips(decorateApiClips(analyzed.clips));
+        setAnalysisReady(true);
+      }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Nie udało się otworzyć projektu.");
     }
@@ -1420,6 +1498,33 @@ export default function App() {
       window.alert(error instanceof Error ? error.message : "Nie udało się usunąć projektu.");
     }
   };
+
+  const persistClips = (nextClips: Clip[]) => {
+    setClips(nextClips);
+    if (!token || !activeProjectId) return;
+    for (const clip of nextClips) {
+      if (typeof clip.id !== "string" || !clip.projectId) continue;
+      void api.updateClip(token, clip as ApiClip).catch(() => undefined);
+    }
+  };
+
+  const exportRealClips = activeProjectId && token
+    ? async (nextClips: Clip[]) => {
+        for (const clip of nextClips) {
+          if (typeof clip.id !== "string" || !clip.projectId) continue;
+          const exported = await api.exportClip(token, clip as ApiClip);
+          const blob = await api.downloadExport(token, exported.export.downloadUrl);
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `${clip.title.toLowerCase().replace(/[^a-z0-9]+/gi, "-") || "cutwise-klip"}.mp4`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        }
+      }
+    : undefined;
 
   if (authLoading) {
     return <main className="auth-screen"><LoaderCircle size={34} className="spin" /></main>;
@@ -1452,6 +1557,8 @@ export default function App() {
         <AnalysisScreen
           fileName={fileName}
           videoUrl={videoUrl}
+          ready={analysisReady}
+          error={analysisError}
           onComplete={() => setScreen("results")}
           onCancel={resetProject}
         />
@@ -1462,11 +1569,26 @@ export default function App() {
           fileName={fileName}
           videoUrl={videoUrl}
           videoDuration={videoDuration}
-          onClipsChange={setClips}
+          onClipsChange={persistClips}
           onHome={() => setScreen("home")}
           onRegenerate={() => {
-            if (videoDuration > 0 && clips.length) setClips(clipsForDuration(videoDuration));
+            if (!token || !activeProjectId) {
+              if (videoDuration > 0 && clips.length) setClips(clipsForDuration(videoDuration));
+              return;
+            }
+            setScreen("analysis");
+            setAnalysisReady(false);
+            setAnalysisError(undefined);
+            void api.analyzeProject(token, activeProjectId)
+              .then((response) => {
+                setClips(decorateApiClips(response.clips));
+                setAnalysisReady(true);
+              })
+              .catch((error) => {
+                setAnalysisError(error instanceof Error ? error.message : "Nie udało się ponowić analizy.");
+              });
           }}
+          onExport={exportRealClips}
         />
       )}
     </div>

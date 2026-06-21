@@ -176,6 +176,94 @@ def test_upload_canonicalizes_generic_or_mismatched_mime(api):
     assert webm.json()["project"]["mimeType"] == "video/webm"
 
 
+def test_analysis_persists_clips_and_allows_updates(api):
+    client, _database, _settings = api
+    token = register(client)
+    project = upload(client, token, "analysis.mp4", b"video", "video/mp4").json()["project"]
+
+    analyzed = client.post(f"/api/projects/{project['id']}/analysis", headers=auth(token))
+    assert analyzed.status_code == 200
+    clips = analyzed.json()["clips"]
+    assert clips
+    assert clips[0]["projectId"] == project["id"]
+
+    listed = client.get(f"/api/projects/{project['id']}/clips", headers=auth(token))
+    assert listed.status_code == 200
+    assert listed.json()["clips"] == clips
+
+    updated = client.patch(
+        f"/api/clips/{clips[0]['id']}",
+        headers=auth(token),
+        json={
+            "title": "Poprawiony klip",
+            "startSeconds": 1,
+            "endSeconds": 12,
+            "selected": True,
+            "renderConfig": {
+                "ratio": "1:1",
+                "quality": "720p",
+                "captionsEnabled": False,
+                "trackingEnabled": False,
+            },
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["clip"]["title"] == "Poprawiony klip"
+    assert updated.json()["clip"]["selected"] is True
+    assert updated.json()["clip"]["renderConfig"]["ratio"] == "1:1"
+
+
+def test_export_renders_and_downloads_private_mp4(tmp_path: Path):
+    settings = Settings(
+        jwt_secret="test-secret-with-enough-entropy-" * 2,
+        database_path=Path(":memory:"),
+        upload_dir=tmp_path / "uploads",
+        export_dir=tmp_path / "exports",
+    ).finalized()
+    database = Database(":memory:")
+
+    async def valid_probe(_file_path: Path, _ffprobe_path: str) -> MediaInfo:
+        return MediaInfo(duration=60, format_name="mov,mp4,m4a,3gp,3g2,mj2", has_video=True)
+
+    async def fake_render(
+        _ffmpeg: str,
+        _source: Path,
+        output: Path,
+        _start: float,
+        _end: float,
+        _ratio: str,
+        _quality: str,
+    ) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered-mp4")
+
+    app = create_app(settings, database, valid_probe, fake_render)
+    with TestClient(app) as client:
+        token = register(client)
+        other_token = register(client, "other@example.com")
+        project = upload(client, token, "export.mp4", b"video", "video/mp4").json()["project"]
+        clip = client.post(
+            f"/api/projects/{project['id']}/analysis",
+            headers=auth(token),
+        ).json()["clips"][0]
+        exported = client.post(
+            f"/api/clips/{clip['id']}/exports",
+            headers=auth(token),
+            json={
+                "startSeconds": clip["start"],
+                "endSeconds": clip["end"],
+                "renderConfig": clip["renderConfig"],
+            },
+        )
+        assert exported.status_code == 201
+        download_url = exported.json()["export"]["downloadUrl"]
+        assert client.get(download_url, headers=auth(other_token)).status_code == 404
+        downloaded = client.get(download_url, headers=auth(token))
+        assert downloaded.status_code == 200
+        assert downloaded.content == b"rendered-mp4"
+    database.close()
+
+
 def test_projects_are_isolated_between_users(api):
     client, _database, _settings = api
     first = register(client, "first@example.com")

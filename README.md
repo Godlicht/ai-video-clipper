@@ -10,10 +10,15 @@ Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w kr�
 - historia projektów zapisywana w SQLite,
 - strumieniowanie nagrań z historii przez krótkotrwałe podpisane adresy URL i HTTP Range,
 - odczyt długości filmu przez FFprobe,
-- edytor zakresu klipu, ustawienia renderu i eksport manifestu,
+- trwałe propozycje klipów generowane dla każdego nagrania,
+- edytor zakresu klipu i ustawienia renderu zapisywane w SQLite,
+- rzeczywiste renderowanie i pobieranie MP4 przez FFmpeg,
 - automatyczne testy frontendu i API.
 
-Analiza AI, transkrypcja oraz finalne renderowanie MP4 są implementowane w kolejnych etapach.
+Bez klucza zewnętrznego aplikacja używa lokalnej analizy bazowej, która rozkłada
+propozycje w przebiegu nagrania. Transkrypcja i semantyczne wybieranie momentów
+przez modele AI pozostają kolejnym etapem jakościowym; upload, edycja i eksport
+działają lokalnie bez usług zewnętrznych.
 
 ## Wymagania
 

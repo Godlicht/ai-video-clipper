@@ -18,6 +18,27 @@ export type ApiProject = {
   mediaUrl: string;
 };
 
+export type ApiRenderConfig = {
+  ratio: "9:16" | "1:1" | "16:9";
+  quality: "720p" | "1080p" | "4K";
+  captionsEnabled: boolean;
+  trackingEnabled: boolean;
+};
+
+export type ApiClip = {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  reason: string;
+  start: number;
+  end: number;
+  score: number;
+  transcript: string;
+  selected: boolean;
+  renderConfig: ApiRenderConfig;
+};
+
 type AuthResponse = {
   user: ApiUser;
   token: string;
@@ -82,4 +103,44 @@ export const api = {
 
   getProjectMediaUrl: (token: string, projectId: string) =>
     apiRequest<{ url: string }>(`/api/projects/${projectId}/media-access`, { method: "POST" }, token),
+
+  analyzeProject: (token: string, projectId: string) =>
+    apiRequest<{ clips: ApiClip[] }>(`/api/projects/${projectId}/analysis`, { method: "POST" }, token),
+
+  listClips: (token: string, projectId: string) =>
+    apiRequest<{ clips: ApiClip[] }>(`/api/projects/${projectId}/clips`, {}, token),
+
+  updateClip: (token: string, clip: ApiClip) =>
+    apiRequest<{ clip: ApiClip }>(`/api/clips/${clip.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        title: clip.title,
+        startSeconds: clip.start,
+        endSeconds: clip.end,
+        selected: clip.selected,
+        renderConfig: clip.renderConfig,
+      }),
+    }, token),
+
+  exportClip: (token: string, clip: ApiClip) =>
+    apiRequest<{ export: { id: string; status: string; downloadUrl: string } }>(
+      `/api/clips/${clip.id}/exports`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          startSeconds: clip.start,
+          endSeconds: clip.end,
+          renderConfig: clip.renderConfig,
+        }),
+      },
+      token,
+    ),
+
+  downloadExport: async (token: string, downloadUrl: string) => {
+    const response = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error("Nie udało się pobrać wyrenderowanego klipu.");
+    return response.blob();
+  },
 };

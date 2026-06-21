@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import shutil
 import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -13,6 +15,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
+from typing import Literal
 
 from .auth import (
     auth_dependency,
@@ -26,6 +29,7 @@ from .config import Settings, settings as default_settings
 from .db import Database
 from .media import MediaInfo, format_matches_extension, probe_media, resolve_media_tool
 from .middleware import RequestSizeLimitMiddleware, RequestTooLarge
+from .processing import generate_clip_candidates, render_clip
 
 
 logger = logging.getLogger("cutwise")
@@ -45,6 +49,27 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+
+class RenderConfigRequest(BaseModel):
+    ratio: Literal["9:16", "1:1", "16:9"] = "9:16"
+    quality: Literal["720p", "1080p", "4K"] = "1080p"
+    captionsEnabled: bool = True
+    trackingEnabled: bool = True
+
+
+class ClipPatchRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    startSeconds: float | None = Field(default=None, ge=0)
+    endSeconds: float | None = Field(default=None, gt=0)
+    selected: bool | None = None
+    renderConfig: RenderConfigRequest | None = None
+
+
+class ExportRequest(BaseModel):
+    startSeconds: float = Field(ge=0)
+    endSeconds: float = Field(gt=0)
+    renderConfig: RenderConfigRequest
 
 
 def now_iso() -> str:
@@ -67,7 +92,24 @@ def serialize_project(row: sqlite3.Row) -> dict:
     }
 
 
+def serialize_clip(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "title": row["title"],
+        "description": row["description"],
+        "reason": row["reason"],
+        "start": row["start_seconds"],
+        "end": row["end_seconds"],
+        "score": row["score"],
+        "transcript": row["transcript"],
+        "selected": bool(row["selected"]),
+        "renderConfig": json.loads(row["render_config"]),
+    }
+
+
 ProbeFunction = Callable[[Path, str], Awaitable[MediaInfo | None]]
+RenderFunction = Callable[[str, Path, Path, float, float, str, str], Awaitable[None]]
 
 
 def cleanup_pending_files(database: Database) -> None:
@@ -98,6 +140,7 @@ def create_app(
     app_settings: Settings | None = None,
     database: Database | None = None,
     probe_function: ProbeFunction = probe_media,
+    render_function: RenderFunction = render_clip,
 ) -> FastAPI:
     app_settings = (app_settings or default_settings).finalized()
     app_settings.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +149,7 @@ def create_app(
     cleanup_pending_files(database)
     current_user = auth_dependency(database, app_settings)
     ffprobe_path = resolve_media_tool("ffprobe", app_settings.ffprobe_path)
+    ffmpeg_path = resolve_media_tool("ffmpeg", app_settings.ffmpeg_path)
 
     app = FastAPI(title="Cutwise API", version="0.2.0")
     app.state.settings = app_settings
@@ -292,6 +336,217 @@ def create_app(
         media_token = create_media_token(user["id"], project_id, app_settings)
         return {"url": f"/api/projects/{project_id}/media?token={media_token}"}
 
+    @app.post("/api/projects/{project_id}/analysis")
+    def analyze_project(
+        project_id: str,
+        user: dict[str, str] = Depends(current_user),
+    ) -> dict:
+        with database.connection() as connection:
+            project = connection.execute(
+                "SELECT duration_seconds FROM projects WHERE id = ? AND user_id = ?",
+                (project_id, user["id"]),
+            ).fetchone()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
+
+        candidates = generate_clip_candidates(float(project["duration_seconds"] or 0))
+        timestamp = now_iso()
+        with database.connection() as connection:
+            connection.execute("DELETE FROM clips WHERE project_id = ?", (project_id,))
+            for candidate in candidates:
+                connection.execute(
+                    """
+                    INSERT INTO clips (
+                      id, project_id, title, description, reason, start_seconds,
+                      end_seconds, score, transcript, selected, render_config, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        project_id,
+                        candidate.title,
+                        candidate.description,
+                        candidate.reason,
+                        candidate.start,
+                        candidate.end,
+                        candidate.score,
+                        json.dumps(
+                            {
+                                "ratio": "9:16",
+                                "quality": "1080p",
+                                "captionsEnabled": True,
+                                "trackingEnabled": True,
+                            }
+                        ),
+                        timestamp,
+                    ),
+                )
+            connection.execute(
+                "UPDATE projects SET status = 'ready', error_message = NULL, updated_at = ? WHERE id = ?",
+                (timestamp, project_id),
+            )
+            rows = connection.execute(
+                "SELECT * FROM clips WHERE project_id = ? ORDER BY start_seconds",
+                (project_id,),
+            ).fetchall()
+        shutil.rmtree(app_settings.export_dir / project_id, ignore_errors=True)
+        return {"clips": [serialize_clip(row) for row in rows]}
+
+    @app.get("/api/projects/{project_id}/clips")
+    def list_clips(
+        project_id: str,
+        user: dict[str, str] = Depends(current_user),
+    ) -> dict:
+        with database.connection() as connection:
+            project = connection.execute(
+                "SELECT 1 FROM projects WHERE id = ? AND user_id = ?",
+                (project_id, user["id"]),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT * FROM clips WHERE project_id = ? ORDER BY start_seconds",
+                (project_id,),
+            ).fetchall()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
+        return {"clips": [serialize_clip(row) for row in rows]}
+
+    @app.patch("/api/clips/{clip_id}")
+    def update_clip(
+        clip_id: str,
+        payload: ClipPatchRequest,
+        user: dict[str, str] = Depends(current_user),
+    ) -> dict:
+        with database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT clips.*, projects.duration_seconds
+                FROM clips JOIN projects ON projects.id = clips.project_id
+                WHERE clips.id = ? AND projects.user_id = ?
+                """,
+                (clip_id, user["id"]),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Klip nie istnieje.")
+
+        start = payload.startSeconds if payload.startSeconds is not None else row["start_seconds"]
+        end = payload.endSeconds if payload.endSeconds is not None else row["end_seconds"]
+        if end <= start or end > float(row["duration_seconds"]):
+            raise HTTPException(status_code=400, detail="Zakres klipu jest nieprawidłowy.")
+        render_config = (
+            payload.renderConfig.model_dump()
+            if payload.renderConfig is not None
+            else json.loads(row["render_config"])
+        )
+        with database.connection() as connection:
+            connection.execute(
+                """
+                UPDATE clips SET title = ?, start_seconds = ?, end_seconds = ?,
+                  selected = ?, render_config = ? WHERE id = ?
+                """,
+                (
+                    payload.title or row["title"],
+                    start,
+                    end,
+                    int(payload.selected if payload.selected is not None else bool(row["selected"])),
+                    json.dumps(render_config),
+                    clip_id,
+                ),
+            )
+            updated = connection.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+        return {"clip": serialize_clip(updated)}
+
+    @app.post("/api/clips/{clip_id}/exports", status_code=201)
+    async def create_export(
+        clip_id: str,
+        payload: ExportRequest,
+        user: dict[str, str] = Depends(current_user),
+    ) -> dict:
+        with database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT clips.project_id, projects.source_path, projects.duration_seconds
+                FROM clips JOIN projects ON projects.id = clips.project_id
+                WHERE clips.id = ? AND projects.user_id = ?
+                """,
+                (clip_id, user["id"]),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Klip nie istnieje.")
+        if payload.endSeconds <= payload.startSeconds or payload.endSeconds > float(row["duration_seconds"]):
+            raise HTTPException(status_code=400, detail="Zakres eksportu jest nieprawidłowy.")
+
+        export_id = str(uuid4())
+        timestamp = now_iso()
+        output = app_settings.export_dir / row["project_id"] / f"{export_id}.mp4"
+        render_config = payload.renderConfig.model_dump()
+        with database.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO exports (
+                  id, project_id, clip_id, status, output_path, render_config, created_at
+                ) VALUES (?, ?, ?, 'rendering', ?, ?, ?)
+                """,
+                (export_id, row["project_id"], clip_id, str(output), json.dumps(render_config), timestamp),
+            )
+        try:
+            await render_function(
+                ffmpeg_path,
+                Path(row["source_path"]),
+                output,
+                payload.startSeconds,
+                payload.endSeconds,
+                render_config["ratio"],
+                render_config["quality"],
+            )
+        except asyncio.CancelledError:
+            with database.connection() as connection:
+                connection.execute(
+                    "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
+                    ("Renderowanie zostało przerwane.", export_id),
+                )
+            raise
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            with database.connection() as connection:
+                connection.execute(
+                    "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
+                    (str(exc)[-1000:], export_id),
+                )
+            raise HTTPException(status_code=500, detail="Nie udało się wyrenderować klipu.") from exc
+        with database.connection() as connection:
+            connection.execute(
+                "UPDATE exports SET status = 'completed', completed_at = ? WHERE id = ?",
+                (now_iso(), export_id),
+            )
+        return {
+            "export": {
+                "id": export_id,
+                "status": "completed",
+                "downloadUrl": f"/api/exports/{export_id}/download",
+            }
+        }
+
+    @app.get("/api/exports/{export_id}/download")
+    def download_export(
+        export_id: str,
+        user: dict[str, str] = Depends(current_user),
+    ) -> FileResponse:
+        with database.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT exports.output_path
+                FROM exports JOIN projects ON projects.id = exports.project_id
+                WHERE exports.id = ? AND projects.user_id = ? AND exports.status = 'completed'
+                """,
+                (export_id, user["id"]),
+            ).fetchone()
+        if row is None or not Path(row["output_path"]).is_file():
+            raise HTTPException(status_code=404, detail="Eksport nie istnieje.")
+        return FileResponse(
+            row["output_path"],
+            media_type="video/mp4",
+            filename=f"cutwise-{export_id}.mp4",
+        )
+
     @app.get("/api/projects/{project_id}/media")
     def project_media(
         project_id: str,
@@ -363,6 +618,7 @@ def create_app(
             logger.exception("Nie udało się usunąć projektu")
             raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
         cleanup_pending_files(database)
+        shutil.rmtree(app_settings.export_dir / project_id, ignore_errors=True)
 
     return app
 
