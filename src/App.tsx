@@ -144,7 +144,6 @@ const fmt = (seconds: number) => {
 const DEMO_DURATION = 30 * 60 + 34;
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;
 const MAX_VIDEO_DURATION = 3 * 60 * 60;
-const SUPPORTED_VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
 const SUPPORTED_VIDEO_EXTENSIONS = /\.(mp4|mov|webm)$/i;
 
 const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } }));
@@ -161,8 +160,7 @@ const clipsForDuration = (duration = DEMO_DURATION) => {
 };
 
 const validateVideoFile = (file: File) => {
-  const supportedType = SUPPORTED_VIDEO_TYPES.has(file.type) || (!file.type && SUPPORTED_VIDEO_EXTENSIONS.test(file.name));
-  if (!supportedType) return "Wybierz plik MP4, MOV lub WebM.";
+  if (!SUPPORTED_VIDEO_EXTENSIONS.test(file.name)) return "Wybierz plik MP4, MOV lub WebM.";
   if (file.size > MAX_FILE_SIZE) return "Plik przekracza maksymalny rozmiar 5 GB.";
   return undefined;
 };

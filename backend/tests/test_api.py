@@ -113,6 +113,23 @@ def test_forged_token_for_missing_user_is_rejected(api):
     assert client.get("/api/auth/me", headers=auth(token)).status_code == 401
 
 
+def test_media_token_cannot_be_used_as_session(api):
+    client, _database, _settings = api
+    token = register(client)
+    project = upload(client, token, "private.mp4", b"video", "video/mp4").json()["project"]
+    media_access = client.post(
+        f"/api/projects/{project['id']}/media-access",
+        headers=auth(token),
+    )
+    media_token = media_access.json()["url"].split("token=", 1)[1]
+
+    assert client.get("/api/projects", headers=auth(media_token)).status_code == 401
+    assert client.delete(
+        f"/api/projects/{project['id']}",
+        headers=auth(media_token),
+    ).status_code == 401
+
+
 def test_upload_list_media_and_delete_project(api):
     client, _database, settings = api
     token = register(client)

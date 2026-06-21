@@ -140,6 +140,20 @@ describe("Cutwise prototype", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("MP4, MOV lub WebM");
   });
 
+  it("akceptuje wspierane rozszerzenie z ogólnym MIME", () => {
+    render(<App />);
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+
+    fireEvent.change(input!, {
+      target: {
+        files: [new File(["video"], "nagranie.webm", { type: "application/octet-stream" })],
+      },
+    });
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("wnioskuje MIME z rozszerzenia, gdy przeglądarka go nie poda", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       project: { id: "project-1" },

@@ -28,6 +28,7 @@ def create_token(user: dict[str, str], settings: Settings) -> str:
         "sub": user["id"],
         "email": user["email"],
         "name": user["name"],
+        "scope": "session",
         "iss": "cutwise",
         "iat": now,
         "exp": now + timedelta(days=7),
@@ -80,6 +81,8 @@ def auth_dependency(database: Database, settings: Settings):
         except jwt.PyJWTError as exc:
             raise HTTPException(status_code=401, detail="Sesja wygasła lub token jest nieprawidłowy.") from exc
 
+        if payload.get("scope") != "session":
+            raise HTTPException(status_code=401, detail="Token nie uprawnia do korzystania z API.")
         user_id = payload.get("sub")
         with database.connection() as connection:
             row = connection.execute(
