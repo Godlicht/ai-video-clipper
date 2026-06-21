@@ -149,7 +149,7 @@ const SUPPORTED_VIDEO_EXTENSIONS = /\.(mp4|mov|webm)$/i;
 const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } }));
 
 const clipsForDuration = (duration = DEMO_DURATION) => {
-  if (!Number.isFinite(duration) || duration <= 0) return cloneInitialClips();
+  if (!Number.isFinite(duration) || duration <= 0) return [];
 
   const scale = duration / DEMO_DURATION;
   return initialClips.map((clip) => {
@@ -236,10 +236,14 @@ function useDialogFocus(onClose: () => void, escapeDisabled = false) {
 
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!activeElement || !dialog.contains(activeElement) || !focusable.includes(activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && activeElement === first) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && activeElement === last) {
         event.preventDefault();
         first.focus();
       }
@@ -496,7 +500,7 @@ function HomeScreen({
   );
 }
 
-function AnalysisScreen({
+export function AnalysisScreen({
   fileName,
   videoUrl,
   onComplete,
@@ -510,22 +514,17 @@ function AnalysisScreen({
   const [progress, setProgress] = useState(8);
 
   useEffect(() => {
-    let completionTimer: number | undefined;
     const timer = window.setInterval(() => {
-      setProgress((current) => {
-        if (current >= 100) {
-          window.clearInterval(timer);
-          completionTimer = window.setTimeout(onComplete, 450);
-          return 100;
-        }
-        return Math.min(100, current + (current < 55 ? 4 : 2));
-      });
+      setProgress((current) => Math.min(100, current + (current < 55 ? 4 : 2)));
     }, 220);
-    return () => {
-      window.clearInterval(timer);
-      if (completionTimer) window.clearTimeout(completionTimer);
-    };
-  }, [onComplete]);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (progress < 100) return;
+    const completionTimer = window.setTimeout(onComplete, 450);
+    return () => window.clearTimeout(completionTimer);
+  }, [onComplete, progress]);
 
   const activeStep = progress < 25 ? 0 : progress < 52 ? 1 : progress < 78 ? 2 : 3;
 
@@ -821,7 +820,7 @@ function ResultsScreen({
             <p>Wybierz fragmenty, które chcesz zachować lub dopracować.</p>
           </div>
           <div className="toolbar-actions">
-            <button className="secondary-button" onClick={onRegenerate}><RefreshCw size={15} /> Generuj ponownie</button>
+            <button className="secondary-button" onClick={onRegenerate} disabled={!clips.length || videoDuration <= 0}><RefreshCw size={15} /> Generuj ponownie</button>
             <button className="primary-button" disabled={!selectedCount} onClick={() => openExport(clips.filter((clip) => clip.selected))}>
               Eksportuj wybrane <span>{selectedCount}</span>
             </button>
@@ -842,8 +841,8 @@ function ResultsScreen({
               clip={clip}
               videoUrl={videoUrl}
               playing={activePlaybackId === clip.id}
-              onTogglePlayback={() => setActivePlaybackId(activePlaybackId === clip.id ? null : clip.id)}
-              onPlaybackEnd={() => setActivePlaybackId(null)}
+              onTogglePlayback={() => setActivePlaybackId((current) => current === clip.id ? null : clip.id)}
+              onPlaybackEnd={() => setActivePlaybackId((current) => current === clip.id ? null : current)}
               onEdit={() => openEditor(clip)}
               onToggle={() => onClipsChange(clips.map((item) => item.id === clip.id ? { ...item, selected: !item.selected } : item))}
               onExport={() => openExport([clip])}
@@ -866,7 +865,17 @@ function ResultsScreen({
           }}
         />
       )}
-      {exportClips && <ExportModal clips={exportClips} videoUrl={videoUrl} onClose={() => setExportClips(null)} />}
+      {exportClips && (
+        <ExportModal
+          clips={exportClips}
+          videoUrl={videoUrl}
+          onClose={() => setExportClips(null)}
+          onConfigsChange={(updatedClips) => {
+            const updates = new Map(updatedClips.map((clip) => [clip.id, clip]));
+            onClipsChange(clips.map((clip) => updates.get(clip.id) ?? clip));
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -1019,24 +1028,39 @@ function ExportModal({
   clips,
   videoUrl,
   onClose,
+  onConfigsChange,
 }: {
   clips: Clip[];
   videoUrl?: string;
   onClose: () => void;
+  onConfigsChange: (clips: Clip[]) => void;
 }) {
-  const firstClip = clips[0];
-  const [ratio, setRatio] = useState<Ratio>(firstClip.renderConfig.ratio);
-  const [quality, setQuality] = useState<Quality>(firstClip.renderConfig.quality);
+  const [configuredClips, setConfiguredClips] = useState(() =>
+    clips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } })),
+  );
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
   const exportTimerRef = useRef<number | undefined>(undefined);
   const dialogRef = useDialogFocus(onClose, exporting);
+  const firstClip = configuredClips[0];
+  const commonRatio = configuredClips.every((clip) => clip.renderConfig.ratio === firstClip.renderConfig.ratio)
+    ? firstClip.renderConfig.ratio
+    : undefined;
+  const commonQuality = configuredClips.every((clip) => clip.renderConfig.quality === firstClip.renderConfig.quality)
+    ? firstClip.renderConfig.quality
+    : undefined;
 
   useEffect(() => () => {
     if (exportTimerRef.current) window.clearTimeout(exportTimerRef.current);
   }, []);
 
+  useEffect(() => {
+    if (!done) return;
+    dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+  }, [dialogRef, done]);
+
   const exportVideo = () => {
+    onConfigsChange(configuredClips);
     setExporting(true);
     exportTimerRef.current = window.setTimeout(() => {
       setExporting(false);
@@ -1046,17 +1070,15 @@ function ExportModal({
 
   const downloadManifest = () => {
     const payload = {
-      ratio,
-      quality,
       format: "MP4 / H.264",
       status: "ready_for_render_pipeline",
-      clips: clips.map((clip) => ({
+      clips: configuredClips.map((clip) => ({
         id: clip.id,
         title: clip.title,
         source_range: { start: clip.start, end: clip.end },
         render_config: {
-          ratio,
-          quality,
+          ratio: clip.renderConfig.ratio,
+          quality: clip.renderConfig.quality,
           captions_enabled: clip.renderConfig.captionsEnabled,
           tracking_enabled: clip.renderConfig.trackingEnabled,
         },
@@ -1066,9 +1088,9 @@ function ExportModal({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = clips.length === 1
+    anchor.download = configuredClips.length === 1
       ? `${firstClip.title.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-export.json`
-      : `cutwise-${clips.length}-clips-export.json`;
+      : `cutwise-${configuredClips.length}-clips-export.json`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -1079,7 +1101,7 @@ function ExportModal({
     <div className="modal-backdrop">
       <div ref={dialogRef} className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1}>
         <header className="modal-header">
-          <div><span className="eyebrow"><Download size={14} /> EKSPORT</span><h2 id="export-title">Przygotuj {clips.length === 1 ? "klip" : `${clips.length} klipy`} do publikacji</h2></div>
+          <div><span className="eyebrow"><Download size={14} /> EKSPORT</span><h2 id="export-title">Przygotuj {configuredClips.length === 1 ? "klip" : `${configuredClips.length} klipy`} do publikacji</h2></div>
           <button className="icon-button" onClick={onClose} aria-label="Zamknij eksport"><X size={20} /></button>
         </header>
         {!done ? (
@@ -1088,20 +1110,27 @@ function ExportModal({
               <div className="export-preview">
                 <VideoScene
                   accent={firstClip.accent}
-                  ratio={ratio}
+                  ratio={firstClip.renderConfig.ratio}
                   videoUrl={videoUrl}
-                  transcript={firstClip.transcript}
+                  transcript={firstClip.renderConfig.captionsEnabled ? firstClip.transcript : undefined}
                   start={firstClip.start}
                   end={firstClip.end}
                 />
                 <p>{firstClip.title}</p>
-                <span>{clips.length === 1 ? fmt(firstClip.end - firstClip.start) : `${clips.length} pliki`} · MP4</span>
+                <span>{configuredClips.length === 1 ? fmt(firstClip.end - firstClip.start) : `${configuredClips.length} pliki`} · MP4</span>
               </div>
               <div className="export-options">
-                <label>Format obrazu</label>
+                <label>Format obrazu{configuredClips.length > 1 ? " · zmiana obejmie wszystkie klipy" : ""}</label>
                 <div className="export-ratios">
                   {(["9:16", "1:1", "16:9"] as Ratio[]).map((item) => (
-                    <button key={item} className={ratio === item ? "active" : ""} onClick={() => setRatio(item)}>
+                    <button
+                      key={item}
+                      className={commonRatio === item ? "active" : ""}
+                      onClick={() => setConfiguredClips(configuredClips.map((clip) => ({
+                        ...clip,
+                        renderConfig: { ...clip.renderConfig, ratio: item },
+                      })))}
+                    >
                       <span className={`shape shape-${item.replace(":", "-")}`} />
                       <strong>{item}</strong>
                       <small>{item === "9:16" ? "TikTok, Reels, Shorts" : item === "1:1" ? "Instagram Feed" : "YouTube, LinkedIn"}</small>
@@ -1110,23 +1139,34 @@ function ExportModal({
                 </div>
                 <label>Jakość wideo</label>
                 <div className="quality-row">
-                  {(["720p", "1080p", "4K"] as Quality[]).map((item) => <button key={item} className={quality === item ? "active" : ""} onClick={() => setQuality(item)}>{item}{item === "1080p" && <span>Polecane</span>}</button>)}
+                  {(["720p", "1080p", "4K"] as Quality[]).map((item) => (
+                    <button
+                      key={item}
+                      className={commonQuality === item ? "active" : ""}
+                      onClick={() => setConfiguredClips(configuredClips.map((clip) => ({
+                        ...clip,
+                        renderConfig: { ...clip.renderConfig, quality: item },
+                      })))}
+                    >
+                      {item}{item === "1080p" && <span>Polecane</span>}
+                    </button>
+                  ))}
                 </div>
                 <div className="export-detail"><span>Format</span><strong>MP4 · H.264</strong></div>
-                <div className="export-detail"><span>Szacowany rozmiar</span><strong>~ {42 * clips.length} MB</strong></div>
+                <div className="export-detail"><span>Szacowany rozmiar</span><strong>~ {42 * configuredClips.length} MB</strong></div>
               </div>
             </div>
             <footer className="modal-footer">
               <button className="secondary-button" onClick={onClose}>Anuluj</button>
               <button className="primary-button" onClick={exportVideo} disabled={exporting}>
-                {exporting ? <><LoaderCircle size={17} className="spin" /> Renderowanie…</> : <><Download size={17} /> Eksportuj {clips.length === 1 ? "klip" : `${clips.length} klipy`}</>}
+                {exporting ? <><LoaderCircle size={17} className="spin" /> Renderowanie…</> : <><Download size={17} /> Eksportuj {configuredClips.length === 1 ? "klip" : `${configuredClips.length} klipy`}</>}
               </button>
             </footer>
           </>
         ) : (
           <div className="export-success">
             <div className="success-mark"><Check size={34} /></div>
-            <span className="eyebrow">{clips.length === 1 ? "KLIP GOTOWY" : "KLIPY GOTOWE"}</span>
+            <span className="eyebrow">{configuredClips.length === 1 ? "KLIP GOTOWY" : "KLIPY GOTOWE"}</span>
             <h2>Świetnie wygląda!</h2>
             <p>W produkcyjnej wersji wyrenderowany plik MP4 będzie gotowy do pobrania. Ten prototyp pobiera manifest eksportu.</p>
             <button className="primary-button" onClick={downloadManifest}><Download size={17} /> Pobierz manifest</button>
@@ -1229,7 +1269,9 @@ export default function App() {
           videoDuration={videoDuration}
           onClipsChange={setClips}
           onHome={() => setScreen("home")}
-          onRegenerate={() => setClips(clipsForDuration(videoDuration))}
+          onRegenerate={() => {
+            if (videoDuration > 0 && clips.length) setClips(clipsForDuration(videoDuration));
+          }}
         />
       )}
     </div>

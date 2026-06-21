@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import App, { VideoScene } from "./App";
+import { StrictMode } from "react";
+import App, { AnalysisScreen, VideoScene } from "./App";
 
 const openDemoResults = async () => {
   const user = userEvent.setup();
@@ -11,6 +12,27 @@ const openDemoResults = async () => {
 };
 
 describe("Cutwise prototype", () => {
+  it("czyści timer zakończenia analizy po odmontowaniu w StrictMode", () => {
+    vi.useFakeTimers();
+    const onComplete = vi.fn();
+    const { unmount } = render(
+      <StrictMode>
+        <AnalysisScreen
+          fileName="test.mp4"
+          onComplete={onComplete}
+          onCancel={() => undefined}
+        />
+      </StrictMode>,
+    );
+
+    act(() => vi.advanceTimersByTime(9000));
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    unmount();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(onComplete).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
   it("synchronizuje element video z zakresem klipu i zatrzymuje go na końcu", async () => {
     const onPlaybackEnd = vi.fn();
     const playSpy = vi.spyOn(HTMLMediaElement.prototype, "play");
@@ -103,6 +125,34 @@ describe("Cutwise prototype", () => {
     expect(within(exportDialog).getByRole("button", { name: /^1:1/i })).toHaveClass("active");
   });
 
+  it("zachowuje indywidualne formaty w eksporcie wielu klipów, dopóki użytkownik ich nie nadpisze", async () => {
+    const user = await openDemoResults();
+    await user.click(screen.getAllByRole("button", { name: /Edytuj klip/i })[1]);
+    const editor = screen.getByRole("dialog", { name: /Jedno pytanie/i });
+    await user.click(within(editor).getByRole("button", { name: /^1:1/i }));
+    await user.click(within(editor).getByRole("button", { name: /Zapisz zmiany/i }));
+
+    await user.click(screen.getByRole("button", { name: /Eksportuj wybrane/i }));
+    const exportDialog = screen.getByRole("dialog", { name: /Przygotuj 2 klipy/i });
+    expect(within(exportDialog).getByRole("button", { name: /^9:16/i })).not.toHaveClass("active");
+    expect(within(exportDialog).getByRole("button", { name: /^1:1/i })).not.toHaveClass("active");
+
+    await user.click(within(exportDialog).getByRole("button", { name: /^16:9/i }));
+    expect(within(exportDialog).getByRole("button", { name: /^16:9/i })).toHaveClass("active");
+  });
+
+  it("utrzymuje fokus w modalu, gdy aktywny przycisk zostaje wyłączony", async () => {
+    const user = await openDemoResults();
+    await user.click(screen.getByRole("button", { name: /Eksportuj wybrane/i }));
+    const exportDialog = screen.getByRole("dialog", { name: /Przygotuj 2 klipy/i });
+    const exportButton = within(exportDialog).getByRole("button", { name: /Eksportuj 2 klipy/i });
+    exportButton.focus();
+    fireEvent.click(exportButton);
+    fireEvent.keyDown(document, { key: "Tab" });
+
+    expect(within(exportDialog).getByRole("button", { name: /Zamknij eksport/i })).toHaveFocus();
+  });
+
   it("ignoruje zakończenie nieaktualnego uploadu po resecie projektu", async () => {
     const user = userEvent.setup();
     const nativeCreateElement = document.createElement.bind(document);
@@ -138,5 +188,17 @@ describe("Cutwise prototype", () => {
     await user.click(screen.getByRole("button", { name: /^Wybrane$/i }));
 
     expect(screen.getAllByRole("article")).toHaveLength(2);
+  });
+
+  it("nie pozwala regenerować klipów w pustym projekcie", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const newProjectButtons = screen.getAllByRole("button", { name: /Nowy projekt/i });
+    await user.click(newProjectButtons[newProjectButtons.length - 1]);
+    const clipsButtons = screen.getAllByRole("button", { name: /Moje klipy/i });
+    await user.click(clipsButtons[clipsButtons.length - 1]);
+
+    expect(screen.getByRole("button", { name: /Generuj ponownie/i })).toBeDisabled();
+    expect(screen.getByText("Nie masz jeszcze wybranych klipów.")).toBeInTheDocument();
   });
 });
