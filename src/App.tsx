@@ -1376,6 +1376,8 @@ export default function App() {
 
   const loadDemo = () => {
     uploadGenerationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
     setVideoUrl(undefined);
     setVideoDuration(DEMO_DURATION);
     setClips(cloneInitialClips());

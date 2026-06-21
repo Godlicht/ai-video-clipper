@@ -44,7 +44,7 @@ def create_media_token(user_id: str, project_id: str, settings: Settings) -> str
             "scope": "project_media",
             "iss": "cutwise",
             "iat": now,
-            "exp": now + timedelta(minutes=10),
+            "exp": now + timedelta(hours=4),
         },
         settings.jwt_secret,
         algorithm="HS256",

@@ -26,7 +26,9 @@ type AuthResponse = {
 const apiRequest = async <T>(path: string, options: RequestInit = {}, token?: string): Promise<T> => {
   const headers = new Headers(options.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  if (options.body && !(options.body instanceof FormData) && !(options.body instanceof Blob)) {
+    headers.set("Content-Type", "application/json");
+  }
 
   const response = await fetch(path, { ...options, headers });
   if (!response.ok) {
@@ -56,10 +58,17 @@ export const api = {
     apiRequest<{ projects: ApiProject[] }>("/api/projects", {}, token),
 
   createProject: (token: string, file: File, title?: string, signal?: AbortSignal) => {
-    const form = new FormData();
-    form.append("video", file);
-    if (title) form.append("title", title);
-    return apiRequest<{ project: ApiProject }>("/api/projects", { method: "POST", body: form, signal }, token);
+    const headers: Record<string, string> = {
+      "X-Filename": encodeURIComponent(file.name),
+      "X-Mime-Type": file.type,
+    };
+    if (title) headers["X-Project-Title"] = encodeURIComponent(title);
+    return apiRequest<{ project: ApiProject }>("/api/projects", {
+      method: "POST",
+      body: file,
+      headers,
+      signal,
+    }, token);
   },
 
   deleteProject: (token: string, projectId: string) =>

@@ -6,9 +6,10 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -24,7 +25,7 @@ from .auth import (
 from .config import Settings, settings as default_settings
 from .db import Database
 from .media import MediaInfo, format_matches_extension, probe_media, resolve_media_tool
-from .middleware import RequestSizeLimitMiddleware
+from .middleware import RequestSizeLimitMiddleware, RequestTooLarge
 
 
 logger = logging.getLogger("cutwise")
@@ -98,7 +99,7 @@ def create_app(
     app.state.database = database
     app.add_middleware(
         RequestSizeLimitMiddleware,
-        max_bytes=app_settings.max_upload_bytes + 8 * 1024 * 1024,
+        max_bytes=app_settings.max_upload_bytes,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -179,24 +180,28 @@ def create_app(
 
     @app.post("/api/projects", status_code=201)
     async def create_project(
-        video: UploadFile = File(),
-        title: str | None = Form(default=None),
+        request: Request,
+        x_filename: str = Header(),
+        x_mime_type: str = Header(),
+        x_project_title: str | None = Header(default=None),
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
-        original_name = Path(video.filename or "video").name
+        original_name = Path(unquote(x_filename)).name
         extension = Path(original_name).suffix.lower()
-        if video.content_type not in ALLOWED_MIME_TYPES or extension not in ALLOWED_EXTENSIONS:
+        if x_mime_type not in ALLOWED_MIME_TYPES or extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Dozwolone są wyłącznie pliki MP4, MOV i WebM.")
 
         destination = app_settings.upload_dir / f"{uuid4()}{extension}"
         written = 0
         try:
             with destination.open("xb") as output:
-                while chunk := await video.read(1024 * 1024):
+                async for chunk in request.stream():
                     written += len(chunk)
                     if written > app_settings.max_upload_bytes:
                         raise HTTPException(status_code=413, detail="Plik przekracza limit 5 GB.")
                     output.write(chunk)
+            if written == 0:
+                raise HTTPException(status_code=400, detail="Przesłany plik jest pusty.")
 
             media = await probe_function(destination, ffprobe_path)
             if (
@@ -213,7 +218,8 @@ def create_app(
 
             project_id = str(uuid4())
             timestamp = now_iso()
-            project_title = (title or Path(original_name).stem).strip()[:160] or "Nowy projekt"
+            decoded_title = unquote(x_project_title) if x_project_title else None
+            project_title = (decoded_title or Path(original_name).stem).strip()[:160] or "Nowy projekt"
             with database.connection() as connection:
                 connection.execute(
                     """
@@ -228,7 +234,7 @@ def create_app(
                         project_title,
                         original_name,
                         str(destination),
-                        video.content_type,
+                        x_mime_type,
                         written,
                         media.duration,
                         timestamp,
@@ -243,6 +249,9 @@ def create_app(
                     """,
                     (project_id,),
                 ).fetchone()
+        except RequestTooLarge:
+            destination.unlink(missing_ok=True)
+            raise
         except asyncio.CancelledError:
             destination.unlink(missing_ok=True)
             raise
@@ -253,8 +262,6 @@ def create_app(
             destination.unlink(missing_ok=True)
             logger.exception("Nie udało się zapisać projektu")
             raise HTTPException(status_code=500, detail="Nieoczekiwany błąd serwera.") from exc
-        finally:
-            await video.close()
         return {"project": serialize_project(row)}
 
     @app.post("/api/projects/{project_id}/media-access")

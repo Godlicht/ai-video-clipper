@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import CancelledError as FutureCancelledError
 from pathlib import Path
+from urllib.parse import quote
 
 import jwt
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 from backend.config import Settings
@@ -46,6 +48,24 @@ def register(client: TestClient, email: str = "jakub@example.com") -> str:
 
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def upload(
+    client: TestClient,
+    token: str | None,
+    filename: str,
+    content: bytes,
+    mime_type: str,
+    title: str | None = None,
+):
+    headers = {
+        "X-Filename": quote(filename),
+        "X-Mime-Type": mime_type,
+        **(auth(token) if token else {}),
+    }
+    if title:
+        headers["X-Project-Title"] = quote(title)
+    return client.post("/api/projects", headers=headers, content=content)
 
 
 def test_register_login_and_profile(api):
@@ -96,12 +116,7 @@ def test_upload_list_media_and_delete_project(api):
     client, _database, settings = api
     token = register(client)
 
-    created = client.post(
-        "/api/projects",
-        headers=auth(token),
-        data={"title": "Mój podcast"},
-        files={"video": ("podcast.mp4", b"video-content", "video/mp4")},
-    )
+    created = upload(client, token, "podcast.mp4", b"video-content", "video/mp4", "Mój podcast")
     assert created.status_code == 201
     project = created.json()["project"]
     assert project["status"] == "uploaded"
@@ -134,11 +149,7 @@ def test_projects_are_isolated_between_users(api):
     client, _database, _settings = api
     first = register(client, "first@example.com")
     second = register(client, "second@example.com")
-    created = client.post(
-        "/api/projects",
-        headers=auth(first),
-        files={"video": ("private.webm", b"video-content", "video/webm")},
-    ).json()["project"]
+    created = upload(client, first, "private.webm", b"video-content", "video/webm").json()["project"]
 
     assert client.get(f"/api/projects/{created['id']}", headers=auth(second)).status_code == 404
     assert client.post(
@@ -149,28 +160,44 @@ def test_projects_are_isolated_between_users(api):
 
 def test_rejects_unauthenticated_and_wrong_extension(api):
     client, _database, _settings = api
-    unauthenticated = client.post(
-        "/api/projects",
-        files={"video": ("video.mp4", b"video", "video/mp4")},
-    )
+    unauthenticated = upload(client, None, "video.mp4", b"video", "video/mp4")
     assert unauthenticated.status_code == 401
 
     token = register(client)
-    invalid = client.post(
-        "/api/projects",
-        headers=auth(token),
-        files={"video": ("notes.txt", b"text", "text/plain")},
-    )
+    invalid = upload(client, token, "notes.txt", b"text", "text/plain")
     assert invalid.status_code == 400
 
 
 def test_request_limit_rejects_before_endpoint_parses_upload(api):
     client, _database, settings = api
     oversized = b"x" * (settings.max_upload_bytes + 9 * 1024 * 1024)
-    response = client.post(
-        "/api/projects",
-        files={"video": ("oversized.mp4", oversized, "video/mp4")},
-    )
+    response = upload(client, None, "oversized.mp4", oversized, "video/mp4")
+    assert response.status_code == 413
+    assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_chunked_request_limit_returns_413_and_cleans_destination(api):
+    client, _database, settings = api
+    token = register(client)
+
+    async def scenario():
+        async def chunks():
+            yield b"x" * 700_000
+            yield b"y" * 700_000
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+            return await async_client.post(
+                "/api/projects",
+                headers={
+                    **auth(token),
+                    "X-Filename": "chunked.mp4",
+                    "X-Mime-Type": "video/mp4",
+                },
+                content=chunks(),
+            )
+
+    response = asyncio.run(scenario())
     assert response.status_code == 413
     assert list(settings.upload_dir.iterdir()) == []
 
@@ -189,11 +216,7 @@ def test_invalid_media_is_removed(tmp_path: Path):
 
     with TestClient(create_app(settings, database, reject_probe)) as client:
         token = register(client)
-        response = client.post(
-            "/api/projects",
-            headers=auth(token),
-            files={"video": ("fake.mp4", b"not-video", "video/mp4")},
-        )
+        response = upload(client, token, "fake.mp4", b"not-video", "video/mp4")
         assert response.status_code == 400
         assert list(settings.upload_dir.iterdir()) == []
     database.close()
@@ -205,11 +228,7 @@ def test_file_is_removed_when_database_insert_fails(api):
     with database.connection() as connection:
         connection.execute("DROP TABLE projects")
 
-    response = client.post(
-        "/api/projects",
-        headers=auth(token),
-        files={"video": ("valid.mp4", b"video", "video/mp4")},
-    )
+    response = upload(client, token, "valid.mp4", b"video", "video/mp4")
     assert response.status_code == 500
     assert list(settings.upload_dir.iterdir()) == []
 
@@ -229,11 +248,7 @@ def test_cancelled_upload_removes_destination(tmp_path: Path):
     with TestClient(create_app(settings, database, cancelled_probe), raise_server_exceptions=True) as client:
         token = register(client)
         with pytest.raises((asyncio.CancelledError, FutureCancelledError)):
-            client.post(
-                "/api/projects",
-                headers=auth(token),
-                files={"video": ("cancelled.mp4", b"video", "video/mp4")},
-            )
+            upload(client, token, "cancelled.mp4", b"video", "video/mp4")
         assert list(settings.upload_dir.iterdir()) == []
     database.close()
 
@@ -241,11 +256,7 @@ def test_cancelled_upload_removes_destination(tmp_path: Path):
 def test_delete_uses_durable_cleanup_journal(api, monkeypatch):
     client, database, settings = api
     token = register(client)
-    project = client.post(
-        "/api/projects",
-        headers=auth(token),
-        files={"video": ("delete.mp4", b"video", "video/mp4")},
-    ).json()["project"]
+    project = upload(client, token, "delete.mp4", b"video", "video/mp4").json()["project"]
 
     original_unlink = Path.unlink
 

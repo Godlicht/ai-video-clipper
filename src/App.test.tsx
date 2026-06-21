@@ -238,6 +238,34 @@ describe("Cutwise prototype", () => {
     });
   });
 
+  it("anuluje aktywny request uploadu po otwarciu demo", async () => {
+    const user = userEvent.setup();
+    const nativeCreateElement = document.createElement.bind(document);
+    let metadataVideo: HTMLVideoElement | undefined;
+    let uploadSignal: AbortSignal | undefined;
+    vi.spyOn(document, "createElement").mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+      const element = nativeCreateElement(tagName, options);
+      if (tagName.toLowerCase() === "video") metadataVideo = element as HTMLVideoElement;
+      return element;
+    }) as typeof document.createElement);
+    vi.spyOn(api, "createProject").mockImplementation((_token, _file, _title, signal) => {
+      uploadSignal = signal;
+      return new Promise(() => undefined);
+    });
+
+    render(<App />);
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]');
+    fireEvent.change(input!, {
+      target: { files: [new File(["video"], "pending.mp4", { type: "video/mp4" })] },
+    });
+    Object.defineProperty(metadataVideo!, "duration", { configurable: true, value: 60 });
+    metadataVideo!.onloadedmetadata?.(new Event("loadedmetadata"));
+    await waitFor(() => expect(api.createProject).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: /Otwórz demo/i }));
+    expect(uploadSignal?.aborted).toBe(true);
+  });
+
   it("filtr Wybrane pokazuje tylko aktualnie zaznaczone klipy", async () => {
     const user = await openDemoResults();
     await user.click(screen.getByRole("button", { name: /^Wybrane$/i }));
