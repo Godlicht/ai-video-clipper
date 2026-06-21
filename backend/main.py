@@ -54,8 +54,8 @@ class LoginRequest(BaseModel):
 class RenderConfigRequest(BaseModel):
     ratio: Literal["9:16", "1:1", "16:9"] = "9:16"
     quality: Literal["720p", "1080p", "4K"] = "1080p"
-    captionsEnabled: bool = True
-    trackingEnabled: bool = True
+    captionsEnabled: bool = False
+    trackingEnabled: bool = False
 
 
 class ClipPatchRequest(BaseModel):
@@ -150,6 +150,10 @@ def create_app(
     current_user = auth_dependency(database, app_settings)
     ffprobe_path = resolve_media_tool("ffprobe", app_settings.ffprobe_path)
     ffmpeg_path = resolve_media_tool("ffmpeg", app_settings.ffmpeg_path)
+    project_locks: dict[str, asyncio.Lock] = {}
+
+    def project_lock(project_id: str) -> asyncio.Lock:
+        return project_locks.setdefault(project_id, asyncio.Lock())
 
     app = FastAPI(title="Cutwise API", version="0.2.0")
     app.state.settings = app_settings
@@ -337,59 +341,62 @@ def create_app(
         return {"url": f"/api/projects/{project_id}/media?token={media_token}"}
 
     @app.post("/api/projects/{project_id}/analysis")
-    def analyze_project(
+    async def analyze_project(
         project_id: str,
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
-        with database.connection() as connection:
-            project = connection.execute(
-                "SELECT duration_seconds FROM projects WHERE id = ? AND user_id = ?",
-                (project_id, user["id"]),
-            ).fetchone()
-        if project is None:
-            raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
+        lock = project_lock(project_id)
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="Projekt jest obecnie renderowany.")
+        async with lock:
+            with database.connection() as connection:
+                project = connection.execute(
+                    "SELECT duration_seconds FROM projects WHERE id = ? AND user_id = ?",
+                    (project_id, user["id"]),
+                ).fetchone()
+            if project is None:
+                raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
 
-        candidates = generate_clip_candidates(float(project["duration_seconds"] or 0))
-        timestamp = now_iso()
-        with database.connection() as connection:
-            connection.execute("DELETE FROM clips WHERE project_id = ?", (project_id,))
-            for candidate in candidates:
-                connection.execute(
-                    """
-                    INSERT INTO clips (
-                      id, project_id, title, description, reason, start_seconds,
-                      end_seconds, score, transcript, selected, render_config, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
-                    """,
-                    (
-                        str(uuid4()),
-                        project_id,
-                        candidate.title,
-                        candidate.description,
-                        candidate.reason,
-                        candidate.start,
-                        candidate.end,
-                        candidate.score,
-                        json.dumps(
-                            {
-                                "ratio": "9:16",
-                                "quality": "1080p",
-                                "captionsEnabled": True,
-                                "trackingEnabled": True,
-                            }
+            candidates = generate_clip_candidates(float(project["duration_seconds"] or 0))
+            timestamp = now_iso()
+            with database.connection() as connection:
+                connection.execute("DELETE FROM clips WHERE project_id = ?", (project_id,))
+                for candidate in candidates:
+                    connection.execute(
+                        """
+                        INSERT INTO clips (
+                          id, project_id, title, description, reason, start_seconds,
+                          end_seconds, score, transcript, selected, render_config, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+                        """,
+                        (
+                            str(uuid4()),
+                            project_id,
+                            candidate.title,
+                            candidate.description,
+                            candidate.reason,
+                            candidate.start,
+                            candidate.end,
+                            candidate.score,
+                            json.dumps(
+                                {
+                                    "ratio": "9:16",
+                                    "quality": "1080p",
+                                    "captionsEnabled": False,
+                                    "trackingEnabled": False,
+                                }
+                            ),
+                            timestamp,
                         ),
-                        timestamp,
-                    ),
+                    )
+                connection.execute(
+                    "UPDATE projects SET status = 'ready', error_message = NULL, updated_at = ? WHERE id = ?",
+                    (timestamp, project_id),
                 )
-            connection.execute(
-                "UPDATE projects SET status = 'ready', error_message = NULL, updated_at = ? WHERE id = ?",
-                (timestamp, project_id),
-            )
-            rows = connection.execute(
-                "SELECT * FROM clips WHERE project_id = ? ORDER BY start_seconds",
-                (project_id,),
-            ).fetchall()
-        shutil.rmtree(app_settings.export_dir / project_id, ignore_errors=True)
+                rows = connection.execute(
+                    "SELECT * FROM clips WHERE project_id = ? ORDER BY start_seconds",
+                    (project_id,),
+                ).fetchall()
         return {"clips": [serialize_clip(row) for row in rows]}
 
     @app.get("/api/projects/{project_id}/clips")
@@ -462,61 +469,79 @@ def create_app(
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
         with database.connection() as connection:
-            row = connection.execute(
+            owner = connection.execute(
                 """
-                SELECT clips.project_id, projects.source_path, projects.duration_seconds
+                SELECT clips.project_id
                 FROM clips JOIN projects ON projects.id = clips.project_id
                 WHERE clips.id = ? AND projects.user_id = ?
                 """,
                 (clip_id, user["id"]),
             ).fetchone()
-        if row is None:
+        if owner is None:
             raise HTTPException(status_code=404, detail="Klip nie istnieje.")
-        if payload.endSeconds <= payload.startSeconds or payload.endSeconds > float(row["duration_seconds"]):
-            raise HTTPException(status_code=400, detail="Zakres eksportu jest nieprawidłowy.")
 
-        export_id = str(uuid4())
-        timestamp = now_iso()
-        output = app_settings.export_dir / row["project_id"] / f"{export_id}.mp4"
-        render_config = payload.renderConfig.model_dump()
-        with database.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO exports (
-                  id, project_id, clip_id, status, output_path, render_config, created_at
-                ) VALUES (?, ?, ?, 'rendering', ?, ?, ?)
-                """,
-                (export_id, row["project_id"], clip_id, str(output), json.dumps(render_config), timestamp),
-            )
-        try:
-            await render_function(
-                ffmpeg_path,
-                Path(row["source_path"]),
-                output,
-                payload.startSeconds,
-                payload.endSeconds,
-                render_config["ratio"],
-                render_config["quality"],
-            )
-        except asyncio.CancelledError:
+        async with project_lock(owner["project_id"]):
+            with database.connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT clips.project_id, projects.source_path, projects.duration_seconds
+                    FROM clips JOIN projects ON projects.id = clips.project_id
+                    WHERE clips.id = ? AND projects.user_id = ?
+                    """,
+                    (clip_id, user["id"]),
+                ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Klip nie istnieje.")
+            if payload.endSeconds <= payload.startSeconds or payload.endSeconds > float(row["duration_seconds"]):
+                raise HTTPException(status_code=400, detail="Zakres eksportu jest nieprawidłowy.")
+
+            export_id = str(uuid4())
+            timestamp = now_iso()
+            output = app_settings.export_dir / row["project_id"] / f"{export_id}.mp4"
+            render_config = payload.renderConfig.model_dump()
             with database.connection() as connection:
                 connection.execute(
-                    "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
-                    ("Renderowanie zostało przerwane.", export_id),
+                    """
+                    INSERT INTO exports (
+                      id, project_id, clip_id, status, output_path, render_config, created_at
+                    ) VALUES (?, ?, ?, 'rendering', ?, ?, ?)
+                    """,
+                    (export_id, row["project_id"], clip_id, str(output), json.dumps(render_config), timestamp),
                 )
-            raise
-        except (OSError, RuntimeError, TimeoutError) as exc:
+            try:
+                await render_function(
+                    ffmpeg_path,
+                    Path(row["source_path"]),
+                    output,
+                    payload.startSeconds,
+                    payload.endSeconds,
+                    render_config["ratio"],
+                    render_config["quality"],
+                )
+            except asyncio.CancelledError:
+                with database.connection() as connection:
+                    connection.execute(
+                        "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
+                        ("Renderowanie zostało przerwane.", export_id),
+                    )
+                raise
+            except Exception as exc:
+                output.unlink(missing_ok=True)
+                with database.connection() as connection:
+                    connection.execute(
+                        "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
+                        (str(exc)[-1000:], export_id),
+                    )
+                logger.exception("Nie udało się wyrenderować klipu")
+                raise HTTPException(status_code=500, detail="Nie udało się wyrenderować klipu.") from exc
             with database.connection() as connection:
-                connection.execute(
-                    "UPDATE exports SET status = 'failed', error_message = ? WHERE id = ?",
-                    (str(exc)[-1000:], export_id),
+                completed = connection.execute(
+                    "UPDATE exports SET status = 'completed', completed_at = ? WHERE id = ?",
+                    (now_iso(), export_id),
                 )
-            raise HTTPException(status_code=500, detail="Nie udało się wyrenderować klipu.") from exc
-        with database.connection() as connection:
-            connection.execute(
-                "UPDATE exports SET status = 'completed', completed_at = ? WHERE id = ?",
-                (now_iso(), export_id),
-            )
+            if completed.rowcount != 1 or not output.is_file():
+                output.unlink(missing_ok=True)
+                raise HTTPException(status_code=409, detail="Projekt zmienił się podczas renderowania.")
         return {
             "export": {
                 "id": export_id,
@@ -571,54 +596,58 @@ def create_app(
         )
 
     @app.delete("/api/projects/{project_id}", status_code=204)
-    def delete_project(
+    async def delete_project(
         project_id: str,
         user: dict[str, str] = Depends(current_user),
     ) -> None:
-        with database.connection() as connection:
-            row = connection.execute(
-                "SELECT source_path FROM projects WHERE id = ? AND user_id = ?",
-                (project_id, user["id"]),
-            ).fetchone()
-        if row is None:
-            return
-
-        source = Path(row["source_path"])
-        quarantine = source.with_name(f"{source.name}.deleting-{uuid4()}")
-        owns_journal = False
-        try:
+        lock = project_lock(project_id)
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="Poczekaj na zakończenie renderowania.")
+        async with lock:
             with database.connection() as connection:
-                claim = connection.execute(
-                    """
-                    INSERT OR IGNORE INTO pending_file_deletions (
-                      project_id, source_path, quarantine_path, created_at
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (project_id, str(source), str(quarantine), now_iso()),
-                )
-                owns_journal = claim.rowcount == 1
-            if not owns_journal:
-                return
-            if source.exists():
-                source.replace(quarantine)
-            with database.connection() as connection:
-                connection.execute(
-                    "DELETE FROM projects WHERE id = ? AND user_id = ?",
+                row = connection.execute(
+                    "SELECT source_path FROM projects WHERE id = ? AND user_id = ?",
                     (project_id, user["id"]),
-                )
-        except Exception as exc:
-            if quarantine.exists() and not source.exists():
-                quarantine.replace(source)
-            if owns_journal:
+                ).fetchone()
+            if row is None:
+                return
+
+            source = Path(row["source_path"])
+            quarantine = source.with_name(f"{source.name}.deleting-{uuid4()}")
+            owns_journal = False
+            try:
+                with database.connection() as connection:
+                    claim = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO pending_file_deletions (
+                          project_id, source_path, quarantine_path, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (project_id, str(source), str(quarantine), now_iso()),
+                    )
+                    owns_journal = claim.rowcount == 1
+                if not owns_journal:
+                    return
+                if source.exists():
+                    source.replace(quarantine)
                 with database.connection() as connection:
                     connection.execute(
-                        "DELETE FROM pending_file_deletions WHERE project_id = ?",
-                        (project_id,),
+                        "DELETE FROM projects WHERE id = ? AND user_id = ?",
+                        (project_id, user["id"]),
                     )
-            logger.exception("Nie udało się usunąć projektu")
-            raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
-        cleanup_pending_files(database)
-        shutil.rmtree(app_settings.export_dir / project_id, ignore_errors=True)
+            except Exception as exc:
+                if quarantine.exists() and not source.exists():
+                    quarantine.replace(source)
+                if owns_journal:
+                    with database.connection() as connection:
+                        connection.execute(
+                            "DELETE FROM pending_file_deletions WHERE project_id = ?",
+                            (project_id,),
+                        )
+                logger.exception("Nie udało się usunąć projektu")
+                raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
+            cleanup_pending_files(database)
+            shutil.rmtree(app_settings.export_dir / project_id, ignore_errors=True)
 
     return app
 

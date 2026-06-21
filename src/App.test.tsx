@@ -214,7 +214,7 @@ describe("Cutwise prototype", () => {
 
     const editor = screen.getByRole("dialog", { name: /Błąd, który kosztował/i });
     await user.click(within(editor).getByRole("button", { name: /^1:1/i }));
-    await user.click(within(editor).getByRole("button", { name: /Przełącz automatyczne napisy/i }));
+    expect(within(editor).getByRole("button", { name: /Automatyczne napisy niedostępne/i })).toBeDisabled();
     await user.click(within(editor).getByRole("button", { name: /Zapisz i eksportuj/i }));
 
     const exportDialog = screen.getByRole("dialog", { name: /Przygotuj klip/i });

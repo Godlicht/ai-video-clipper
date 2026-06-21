@@ -264,6 +264,120 @@ def test_export_renders_and_downloads_private_mp4(tmp_path: Path):
     database.close()
 
 
+def test_render_blocks_delete_and_reanalysis_until_completed(tmp_path: Path):
+    settings = Settings(
+        jwt_secret="test-secret-with-enough-entropy-" * 2,
+        database_path=Path(":memory:"),
+        upload_dir=tmp_path / "uploads",
+        export_dir=tmp_path / "exports",
+    ).finalized()
+    database = Database(":memory:")
+    render_started = asyncio.Event()
+    release_render = asyncio.Event()
+
+    async def valid_probe(_file_path: Path, _ffprobe_path: str) -> MediaInfo:
+        return MediaInfo(duration=60, format_name="mov,mp4,m4a,3gp,3g2,mj2", has_video=True)
+
+    async def slow_render(
+        _ffmpeg: str,
+        _source: Path,
+        output: Path,
+        _start: float,
+        _end: float,
+        _ratio: str,
+        _quality: str,
+    ) -> None:
+        render_started.set()
+        await release_render.wait()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered")
+
+    app = create_app(settings, database, valid_probe, slow_render)
+    with TestClient(app) as client:
+        token = register(client)
+        project = upload(client, token, "race.mp4", b"video", "video/mp4").json()["project"]
+        clip = client.post(
+            f"/api/projects/{project['id']}/analysis",
+            headers=auth(token),
+        ).json()["clips"][0]
+
+        async def scenario():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+                export_task = asyncio.create_task(async_client.post(
+                    f"/api/clips/{clip['id']}/exports",
+                    headers=auth(token),
+                    json={
+                        "startSeconds": clip["start"],
+                        "endSeconds": clip["end"],
+                        "renderConfig": clip["renderConfig"],
+                    },
+                ))
+                await render_started.wait()
+                deleted = await async_client.delete(
+                    f"/api/projects/{project['id']}",
+                    headers=auth(token),
+                )
+                analyzed = await async_client.post(
+                    f"/api/projects/{project['id']}/analysis",
+                    headers=auth(token),
+                )
+                release_render.set()
+                exported = await export_task
+                downloaded = await async_client.get(
+                    exported.json()["export"]["downloadUrl"],
+                    headers=auth(token),
+                )
+                return deleted, analyzed, exported, downloaded
+
+        deleted, analyzed, exported, downloaded = asyncio.run(scenario())
+        assert deleted.status_code == 409
+        assert analyzed.status_code == 409
+        assert exported.status_code == 201
+        assert downloaded.status_code == 200
+        assert downloaded.content == b"rendered"
+    database.close()
+
+
+def test_unexpected_renderer_error_marks_export_failed(tmp_path: Path):
+    settings = Settings(
+        jwt_secret="test-secret-with-enough-entropy-" * 2,
+        database_path=Path(":memory:"),
+        upload_dir=tmp_path / "uploads",
+        export_dir=tmp_path / "exports",
+    ).finalized()
+    database = Database(":memory:")
+
+    async def valid_probe(_file_path: Path, _ffprobe_path: str) -> MediaInfo:
+        return MediaInfo(duration=60, format_name="mov,mp4,m4a,3gp,3g2,mj2", has_video=True)
+
+    async def broken_render(*_args) -> None:
+        raise ValueError("unexpected")
+
+    with TestClient(create_app(settings, database, valid_probe, broken_render)) as client:
+        token = register(client)
+        project = upload(client, token, "broken.mp4", b"video", "video/mp4").json()["project"]
+        clip = client.post(
+            f"/api/projects/{project['id']}/analysis",
+            headers=auth(token),
+        ).json()["clips"][0]
+        response = client.post(
+            f"/api/clips/{clip['id']}/exports",
+            headers=auth(token),
+            json={
+                "startSeconds": clip["start"],
+                "endSeconds": clip["end"],
+                "renderConfig": clip["renderConfig"],
+            },
+        )
+        assert response.status_code == 500
+        with database.connection() as connection:
+            export = connection.execute("SELECT status, error_message FROM exports").fetchone()
+        assert export["status"] == "failed"
+        assert "unexpected" in export["error_message"]
+    database.close()
+
+
 def test_projects_are_isolated_between_users(api):
     client, _database, _settings = api
     first = register(client, "first@example.com")

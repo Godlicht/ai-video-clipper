@@ -77,7 +77,7 @@ const initialClips: Clip[] = [
       "Największy błąd? Przez trzy miesiące budowaliśmy funkcję, której nikt nie potrzebował. Dopiero jedna rozmowa z klientem sprawiła, że wszystko stało się oczywiste.",
     selected: true,
     accent: "scene-purple",
-    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 2,
@@ -93,7 +93,7 @@ const initialClips: Clip[] = [
       "Zapytałem: za co naprawdę płacisz? Nie za więcej funkcji. Za spokój, że praca zostanie wykonana na czas. To jedno pytanie zmieniło naszą strategię.",
     selected: true,
     accent: "scene-blue",
-    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 3,
@@ -109,7 +109,7 @@ const initialClips: Clip[] = [
       "I wtedy zobaczyliśmy pierwszy raport. Wynik był dwa razy lepszy, niż zakładaliśmy. W pokoju zapadła cisza, a potem wszyscy zaczęli się śmiać.",
     selected: false,
     accent: "scene-orange",
-    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 4,
@@ -125,7 +125,7 @@ const initialClips: Clip[] = [
       "Dobry produkt nie zmusza użytkownika, żeby nauczył się waszej logiki. To produkt powinien nauczyć się logiki użytkownika.",
     selected: false,
     accent: "scene-green",
-    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: true, trackingEnabled: true },
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
 ];
 
@@ -543,7 +543,7 @@ function HomeScreen({
                   <div className="play-circle"><Play size={18} fill="currentColor" /></div>
                 </div>
                 <div className="project-info">
-                  <span className="status-ready"><Check size={12} /> {project.status === "uploaded" ? "Wgrano" : "Oczekuje na analizę"}</span>
+                  <span className="status-ready"><Check size={12} /> {project.status === "ready" ? "Gotowy" : project.status === "uploaded" ? "Wgrano" : "Przetwarzanie"}</span>
                   <h4>{project.title}</h4>
                   <p>{(project.sizeBytes / 1024 / 1024).toFixed(1)} MB · {new Date(project.createdAt).toLocaleString("pl-PL")}</p>
                 </div>
@@ -839,6 +839,7 @@ function ResultsScreen({
   onHome,
   onRegenerate,
   onExport,
+  isDemo,
 }: {
   clips: Clip[];
   fileName: string;
@@ -848,6 +849,7 @@ function ResultsScreen({
   onHome: () => void;
   onRegenerate: () => void;
   onExport?: (clips: Clip[]) => Promise<void>;
+  isDemo: boolean;
 }) {
   const [editorClip, setEditorClip] = useState<Clip | null>(null);
   const [exportClips, setExportClips] = useState<Clip[] | null>(null);
@@ -893,7 +895,7 @@ function ResultsScreen({
           <div className="summary-copy">
             <span className="status-ready"><Check size={12} /> Analiza zakończona</span>
             <h2>{fileName.replace(/\.[^.]+$/, "")}</h2>
-            <p>{fmt(videoDuration)} min · Polski · wersja demonstracyjna</p>
+            <p>{fmt(videoDuration)} min · {isDemo ? "wersja demonstracyjna" : "lokalna analiza bazowa"}</p>
           </div>
           <div className="summary-stats">
             <div><strong>{clips.length}</strong><span>propozycje</span></div>
@@ -1001,7 +1003,7 @@ function EditorModal({
   }, [clip.id]);
   const progress = Math.max(0, Math.min(100, ((currentTime - draftClip.start) / Math.max(1, duration)) * 100));
   const minClipLength = Math.min(5, maxDuration);
-  const { ratio, captionsEnabled, trackingEnabled } = draftClip.renderConfig;
+  const { ratio } = draftClip.renderConfig;
   const dialogRef = useDialogFocus(onClose);
 
   const setStart = (value: number) => {
@@ -1034,7 +1036,7 @@ function EditorModal({
               accent={draftClip.accent}
               ratio={ratio}
               videoUrl={videoUrl}
-              transcript={captionsEnabled ? draftClip.transcript : undefined}
+              transcript={undefined}
               playing={playing}
               start={draftClip.start}
               end={draftClip.end}
@@ -1046,7 +1048,7 @@ function EditorModal({
               <button onClick={() => setPlaying(!playing)} aria-label={playing ? "Wstrzymaj podgląd" : "Odtwórz podgląd"}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
               <span>{fmt(currentTime)} / {fmt(draftClip.end)}</span>
               <div className="playback-track"><span style={{ width: `${progress}%` }} /></div>
-              <button onClick={() => updateRenderConfig({ captionsEnabled: !captionsEnabled })} aria-label="Przełącz napisy" className={captionsEnabled ? "active" : ""}><Subtitles size={17} /></button>
+              <button disabled title="Napisy pojawią się po wdrożeniu transkrypcji" aria-label="Napisy niedostępne"><Subtitles size={17} /></button>
               <button disabled title="Tryb pełnoekranowy pojawi się w kolejnej wersji" aria-label="Tryb pełnoekranowy niedostępny"><Square size={16} /></button>
             </div>
           </div>
@@ -1061,12 +1063,12 @@ function EditorModal({
             </div>
             <div className="settings-section">
               <div className="toggle-row">
-                <div><Subtitles size={17} /><span><strong>Automatyczne napisy</strong><small>Dynamiczne wyróżnianie słów</small></span></div>
-                <button className={`toggle ${captionsEnabled ? "active" : ""}`} onClick={() => updateRenderConfig({ captionsEnabled: !captionsEnabled })} aria-label="Przełącz automatyczne napisy"><span /></button>
+                <div><Subtitles size={17} /><span><strong>Automatyczne napisy</strong><small>Dostępne po wdrożeniu transkrypcji</small></span></div>
+                <button className="toggle" disabled aria-label="Automatyczne napisy niedostępne"><span /></button>
               </div>
               <div className="toggle-row">
-                <div><AlignCenter size={17} /><span><strong>Śledzenie twarzy</strong><small>Główna osoba w centrum</small></span></div>
-                <button className={`toggle ${trackingEnabled ? "active" : ""}`} onClick={() => updateRenderConfig({ trackingEnabled: !trackingEnabled })} aria-label="Przełącz śledzenie twarzy"><span /></button>
+                <div><AlignCenter size={17} /><span><strong>Śledzenie twarzy</strong><small>Funkcja jeszcze niedostępna</small></span></div>
+                <button className="toggle" disabled aria-label="Śledzenie twarzy niedostępne"><span /></button>
               </div>
             </div>
             <div className="settings-section transcript-section">
@@ -1306,6 +1308,7 @@ export default function App() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const uploadGenerationRef = useRef(0);
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const clipSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const loadProjects = useCallback(async (activeToken: string) => {
     const response = await api.listProjects(activeToken);
@@ -1502,14 +1505,25 @@ export default function App() {
   const persistClips = (nextClips: Clip[]) => {
     setClips(nextClips);
     if (!token || !activeProjectId) return;
-    for (const clip of nextClips) {
-      if (typeof clip.id !== "string" || !clip.projectId) continue;
-      void api.updateClip(token, clip as ApiClip).catch(() => undefined);
-    }
+    const clipsToSave = nextClips.filter(
+      (clip): clip is Clip & { id: string; projectId: string } => (
+        typeof clip.id === "string" && Boolean(clip.projectId)
+      ),
+    );
+    const saveTask = clipSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        for (const clip of clipsToSave) await api.updateClip(token, clip as ApiClip);
+      });
+    clipSaveQueueRef.current = saveTask;
+    void saveTask.catch((error) => {
+      window.alert(error instanceof Error ? error.message : "Nie udało się zapisać zmian klipu.");
+    });
   };
 
   const exportRealClips = activeProjectId && token
-    ? async (nextClips: Clip[]) => {
+      ? async (nextClips: Clip[]) => {
+        await clipSaveQueueRef.current;
         for (const clip of nextClips) {
           if (typeof clip.id !== "string" || !clip.projectId) continue;
           const exported = await api.exportClip(token, clip as ApiClip);
@@ -1589,6 +1603,7 @@ export default function App() {
               });
           }}
           onExport={exportRealClips}
+          isDemo={!activeProjectId}
         />
       )}
     </div>
