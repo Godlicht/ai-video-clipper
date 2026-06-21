@@ -66,7 +66,7 @@ export const api = {
         : "video/mp4";
     const headers: Record<string, string> = {
       "X-Filename": encodeURIComponent(file.name),
-      "X-Mime-Type": file.type || inferredMime,
+      "X-Mime-Type": inferredMime,
     };
     if (title) headers["X-Project-Title"] = encodeURIComponent(title);
     return apiRequest<{ project: ApiProject }>("/api/projects", {

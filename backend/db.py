@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -127,12 +129,20 @@ class Database:
                     """
                 )
                 for legacy_path in legacy_paths:
-                    try:
-                        Path(legacy_path).unlink(missing_ok=True)
-                    except OSError:
-                        # The legacy schema represented files whose DB rows were
-                        # already deleted. A failed cleanup can be retried manually.
-                        pass
+                    legacy_id = hashlib.sha256(legacy_path.encode("utf-8")).hexdigest()
+                    connection.execute(
+                        """
+                        INSERT INTO pending_file_deletions (
+                          project_id, source_path, quarantine_path, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            f"legacy-{legacy_id}",
+                            legacy_path,
+                            legacy_path,
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    )
 
     def close(self) -> None:
         if self._memory_connection:

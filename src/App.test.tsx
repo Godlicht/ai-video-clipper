@@ -152,6 +152,21 @@ describe("Cutwise prototype", () => {
     expect(headers.get("X-Mime-Type")).toBe("video/quicktime");
   });
 
+  it("nadpisuje ogólny MIME typem wynikającym z rozszerzenia", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      project: { id: "project-1" },
+    }), { status: 201, headers: { "Content-Type": "application/json" } }));
+
+    await api.createProject(
+      "token",
+      new File(["video"], "film.webm", { type: "application/octet-stream" }),
+    );
+
+    const request = vi.mocked(fetch).mock.calls[0];
+    const headers = new Headers((request[1] as RequestInit).headers);
+    expect(headers.get("X-Mime-Type")).toBe("video/webm");
+  });
+
   it("otwiera eksport dla wszystkich zaznaczonych klipów", async () => {
     const user = await openDemoResults();
 

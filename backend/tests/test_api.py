@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from concurrent.futures import CancelledError as FutureCancelledError
 from pathlib import Path
 from urllib.parse import quote
@@ -143,6 +144,19 @@ def test_upload_list_media_and_delete_project(api):
     deleted = client.delete(f"/api/projects/{project['id']}", headers=auth(token))
     assert deleted.status_code == 204
     assert list(settings.upload_dir.iterdir()) == []
+
+
+def test_upload_canonicalizes_generic_or_mismatched_mime(api):
+    client, _database, _settings = api
+    token = register(client)
+
+    mov = upload(client, token, "recording.mov", b"video", "application/octet-stream")
+    assert mov.status_code == 201
+    assert mov.json()["project"]["mimeType"] == "video/quicktime"
+
+    webm = upload(client, token, "recording.webm", b"video", "video/mp4")
+    assert webm.status_code == 201
+    assert webm.json()["project"]["mimeType"] == "video/webm"
 
 
 def test_projects_are_isolated_between_users(api):
@@ -302,3 +316,71 @@ def test_cleanup_recovers_crash_before_quarantine_rename(api):
         assert connection.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 0
     assert not source.exists()
     assert not quarantine.exists()
+
+
+def test_second_delete_does_not_remove_existing_cleanup_claim(api):
+    client, database, settings = api
+    token = register(client)
+    project = upload(client, token, "claimed.mp4", b"video", "video/mp4").json()["project"]
+    source = next(settings.upload_dir.iterdir())
+    quarantine = source.with_name(f"{source.name}.deleting-owner")
+
+    with database.connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO pending_file_deletions (
+              project_id, source_path, quarantine_path, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (project["id"], str(source), str(quarantine), "2026-01-01T00:00:00+00:00"),
+        )
+
+    response = client.delete(f"/api/projects/{project['id']}", headers=auth(token))
+    assert response.status_code == 204
+    with database.connection() as connection:
+        journal = connection.execute(
+            "SELECT source_path, quarantine_path FROM pending_file_deletions WHERE project_id = ?",
+            (project["id"],),
+        ).fetchone()
+        assert journal is not None
+        assert journal["source_path"] == str(source)
+        assert journal["quarantine_path"] == str(quarantine)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM projects WHERE id = ?",
+            (project["id"],),
+        ).fetchone()[0] == 1
+    assert source.exists()
+    assert not quarantine.exists()
+
+
+def test_legacy_cleanup_migration_keeps_work_for_retry(tmp_path: Path):
+    database_path = tmp_path / "legacy.sqlite3"
+    pending_file = tmp_path / "legacy-upload.mp4"
+    pending_file.write_bytes(b"video")
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE pending_file_deletions (path TEXT PRIMARY KEY, created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO pending_file_deletions (path, created_at) VALUES (?, ?)",
+        (str(pending_file), "2026-01-01T00:00:00+00:00"),
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(database_path)
+    with database.connection() as migrated:
+        row = migrated.execute(
+            "SELECT project_id, source_path, quarantine_path FROM pending_file_deletions"
+        ).fetchone()
+    assert row is not None
+    assert row["project_id"].startswith("legacy-")
+    assert row["source_path"] == str(pending_file)
+    assert row["quarantine_path"] == str(pending_file)
+    assert pending_file.exists()
+
+    cleanup_pending_files(database)
+    with database.connection() as cleaned:
+        assert cleaned.execute("SELECT COUNT(*) FROM pending_file_deletions").fetchone()[0] == 0
+    assert not pending_file.exists()

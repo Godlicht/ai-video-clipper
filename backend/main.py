@@ -29,8 +29,11 @@ from .middleware import RequestSizeLimitMiddleware, RequestTooLarge
 
 
 logger = logging.getLogger("cutwise")
-ALLOWED_MIME_TYPES = {"video/mp4", "video/quicktime", "video/webm"}
-ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm"}
+CANONICAL_MIME_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
 
 
 class RegisterRequest(BaseModel):
@@ -192,13 +195,13 @@ def create_app(
     async def create_project(
         request: Request,
         x_filename: str = Header(),
-        x_mime_type: str = Header(),
         x_project_title: str | None = Header(default=None),
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
         original_name = Path(unquote(x_filename)).name
         extension = Path(original_name).suffix.lower()
-        if x_mime_type not in ALLOWED_MIME_TYPES or extension not in ALLOWED_EXTENSIONS:
+        canonical_mime_type = CANONICAL_MIME_TYPES.get(extension)
+        if canonical_mime_type is None:
             raise HTTPException(status_code=400, detail="Dozwolone są wyłącznie pliki MP4, MOV i WebM.")
 
         destination = app_settings.upload_dir / f"{uuid4()}{extension}"
@@ -244,7 +247,7 @@ def create_app(
                         project_title,
                         original_name,
                         str(destination),
-                        x_mime_type,
+                        canonical_mime_type,
                         written,
                         media.duration,
                         timestamp,
@@ -323,20 +326,24 @@ def create_app(
                 (project_id, user["id"]),
             ).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
+            return
 
         source = Path(row["source_path"])
         quarantine = source.with_name(f"{source.name}.deleting-{uuid4()}")
+        owns_journal = False
         try:
             with database.connection() as connection:
-                connection.execute(
+                claim = connection.execute(
                     """
-                    INSERT INTO pending_file_deletions (
+                    INSERT OR IGNORE INTO pending_file_deletions (
                       project_id, source_path, quarantine_path, created_at
                     ) VALUES (?, ?, ?, ?)
                     """,
                     (project_id, str(source), str(quarantine), now_iso()),
                 )
+                owns_journal = claim.rowcount == 1
+            if not owns_journal:
+                return
             if source.exists():
                 source.replace(quarantine)
             with database.connection() as connection:
@@ -347,11 +354,12 @@ def create_app(
         except Exception as exc:
             if quarantine.exists() and not source.exists():
                 quarantine.replace(source)
-            with database.connection() as connection:
-                connection.execute(
-                    "DELETE FROM pending_file_deletions WHERE project_id = ?",
-                    (project_id,),
-                )
+            if owns_journal:
+                with database.connection() as connection:
+                    connection.execute(
+                        "DELETE FROM pending_file_deletions WHERE project_id = ?",
+                        (project_id,),
+                    )
             logger.exception("Nie udało się usunąć projektu")
             raise HTTPException(status_code=500, detail="Nie udało się usunąć projektu.") from exc
         cleanup_pending_files(database)
