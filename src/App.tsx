@@ -429,11 +429,15 @@ function HomeScreen({
   onDemo,
   user,
   projects,
+  onOpenProject,
+  onDeleteProject,
 }: {
   onFile: (file: File) => Promise<string | undefined>;
   onDemo: () => void;
   user: ApiUser;
   projects: ApiProject[];
+  onOpenProject: (project: ApiProject) => void;
+  onDeleteProject: (project: ApiProject) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -526,15 +530,19 @@ function HomeScreen({
         <div className="project-grid">
           {projects.slice(0, 3).map((project, index) => (
             <article className="project-card" key={project.id}>
-              <div className={`project-thumb ${["scene-purple", "scene-blue", "scene-green"][index % 3]}`}>
-                <span className="duration-badge">{project.durationSeconds ? fmt(project.durationSeconds) : "—:—"}</span>
-                <div className="abstract-screen" />
-              </div>
-              <div className="project-info">
-                <span className="status-ready"><Check size={12} /> {project.status === "uploaded" ? "Wgrano" : "Oczekuje na analizę"}</span>
-                <h4>{project.title}</h4>
-                <p>{(project.sizeBytes / 1024 / 1024).toFixed(1)} MB · {new Date(project.createdAt).toLocaleString("pl-PL")}</p>
-              </div>
+              <button className="project-open" onClick={() => onOpenProject(project)}>
+                <div className={`project-thumb ${["scene-purple", "scene-blue", "scene-green"][index % 3]}`}>
+                  <span className="duration-badge">{project.durationSeconds ? fmt(project.durationSeconds) : "—:—"}</span>
+                  <div className="abstract-screen" />
+                  <div className="play-circle"><Play size={18} fill="currentColor" /></div>
+                </div>
+                <div className="project-info">
+                  <span className="status-ready"><Check size={12} /> {project.status === "uploaded" ? "Wgrano" : "Oczekuje na analizę"}</span>
+                  <h4>{project.title}</h4>
+                  <p>{(project.sizeBytes / 1024 / 1024).toFixed(1)} MB · {new Date(project.createdAt).toLocaleString("pl-PL")}</p>
+                </div>
+              </button>
+              <button className="project-delete" onClick={() => onDeleteProject(project)} aria-label={`Usuń projekt ${project.title}`}><X size={15} /></button>
             </article>
           ))}
           {!projects.length && (
@@ -1343,6 +1351,9 @@ export default function App() {
 
     if (uploadGeneration !== uploadGenerationRef.current) {
       URL.revokeObjectURL(nextVideoUrl);
+      void api.deleteProject(token, persistedProject.id).catch(() => {
+        void loadProjects(token).catch(() => undefined);
+      });
       return undefined;
     }
 
@@ -1374,6 +1385,32 @@ export default function App() {
     setScreen("home");
   };
 
+  const openProject = async (project: ApiProject) => {
+    if (!token) return;
+    try {
+      const media = await api.getProjectMedia(token, project.id);
+      const nextVideoUrl = URL.createObjectURL(media);
+      const duration = project.durationSeconds ?? await readVideoDuration(nextVideoUrl);
+      setFileName(project.sourceFilename);
+      setVideoDuration(duration);
+      setClips(clipsForDuration(duration));
+      setVideoUrl(nextVideoUrl);
+      setScreen("results");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Nie udało się otworzyć projektu.");
+    }
+  };
+
+  const deleteProject = async (project: ApiProject) => {
+    if (!token || !window.confirm(`Usunąć projekt „${project.title}”?`)) return;
+    try {
+      await api.deleteProject(token, project.id);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Nie udało się usunąć projektu.");
+    }
+  };
+
   if (authLoading) {
     return <main className="auth-screen"><LoaderCircle size={34} className="spin" /></main>;
   }
@@ -1391,7 +1428,16 @@ export default function App() {
         </div>
       </div>
       <Sidebar screen={screen} clipCount={clips.length} user={user} onLogout={logout} onNavigate={setScreen} onNewProject={resetProject} />
-      {screen === "home" && <HomeScreen onFile={handleFile} onDemo={loadDemo} user={user} projects={projects} />}
+      {screen === "home" && (
+        <HomeScreen
+          onFile={handleFile}
+          onDemo={loadDemo}
+          user={user}
+          projects={projects}
+          onOpenProject={openProject}
+          onDeleteProject={deleteProject}
+        />
+      )}
       {screen === "analysis" && (
         <AnalysisScreen
           fileName={fileName}

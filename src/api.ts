@@ -64,4 +64,15 @@ export const api = {
 
   deleteProject: (token: string, projectId: string) =>
     apiRequest<void>(`/api/projects/${projectId}`, { method: "DELETE" }, token),
+
+  getProjectMedia: async (token: string, projectId: string) => {
+    const response = await fetch(`/api/projects/${projectId}/media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: "Nie udało się pobrać nagrania." }));
+      throw new Error(payload.error ?? "Nie udało się pobrać nagrania.");
+    }
+    return response.blob();
+  },
 };

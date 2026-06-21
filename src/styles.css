@@ -116,8 +116,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .section-heading p { margin: 0; color: #97949e; font-size: 11px; }
 .section-heading button { border: 0; background: none; color: var(--purple); font-size: 11px; font-weight: 700; display: flex; gap: 5px; align-items: center; }
 .project-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 17px; }
-.project-card { border: 1px solid var(--line); border-radius: 12px; padding: 0; background: #fff; text-align: left; overflow: hidden; box-shadow: 0 5px 16px rgba(38, 33, 56, .035); transition: .2s; }
+.project-card { border: 1px solid var(--line); border-radius: 12px; padding: 0; background: #fff; text-align: left; overflow: hidden; box-shadow: 0 5px 16px rgba(38, 33, 56, .035); transition: .2s; position: relative; }
 .project-card:hover { transform: translateY(-3px); box-shadow: 0 12px 30px rgba(38, 33, 56, .09); }
+.project-open { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; color: inherit; }
+.project-delete { position: absolute; z-index: 4; top: 8px; left: 8px; width: 28px; height: 28px; border: 0; border-radius: 8px; display: grid; place-items: center; color: #fff; background: rgba(28, 23, 37, .64); backdrop-filter: blur(6px); }
 .project-thumb { height: 128px; position: relative; overflow: hidden; }
 .scene-purple { background: radial-gradient(circle at 70% 20%, #826c9e 0 9%, transparent 32%), linear-gradient(135deg, #332b47, #5f4775 54%, #d28fa0); }
 .scene-blue { background: radial-gradient(circle at 20% 20%, rgba(108,196,255,.55), transparent 34%), linear-gradient(135deg, #172641, #294968 60%, #7e65a1); }

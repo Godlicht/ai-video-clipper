@@ -1,6 +1,6 @@
 # Cutwise — AI Video Clipper
 
-Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w krótkie klipy. Repozytorium zawiera frontend React oraz backend Node/Express z trwałą bazą SQLite.
+Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w krótkie klipy. Repozytorium zawiera frontend React oraz backend Python/FastAPI z trwałą bazą SQLite.
 
 ## Aktualnie działa
 
@@ -17,6 +17,7 @@ Analiza AI, transkrypcja oraz finalne renderowanie MP4 są implementowane w kole
 ## Wymagania
 
 - Node.js 20+,
+- Python 3.13+,
 - FFmpeg i FFprobe dostępne w `PATH` albo wskazane przez `FFMPEG_PATH` i `FFPROBE_PATH`.
 
 Na Windows backend automatycznie wykrywa również instalację `Gyan.FFmpeg` wykonaną przez WinGet.
@@ -25,6 +26,8 @@ Na Windows backend automatycznie wykrywa również instalację `Gyan.FFmpeg` wyk
 
 ```bash
 npm install
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
 copy .env.example .env
 npm run dev
 ```
@@ -39,6 +42,7 @@ Podczas developmentu Vite przekazuje `/api` do backendu.
 
 ```bash
 npm test
+npm run test:server
 npm run lint
 npm run build
 ```

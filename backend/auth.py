@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+import jwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pwdlib import PasswordHash
+
+from .config import Settings
+from .db import Database
+
+
+password_hash = PasswordHash.recommended()
+bearer = HTTPBearer(auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_token(user: dict[str, str], settings: Settings) -> str:
+    now = datetime.now(UTC)
+    payload = {
+        "sub": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "iss": "cutwise",
+        "iat": now,
+        "exp": now + timedelta(days=7),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def auth_dependency(database: Database, settings: Settings):
+    def current_user(
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    ) -> dict[str, str]:
+        if credentials is None:
+            raise HTTPException(status_code=401, detail="Brak tokenu autoryzacyjnego.")
+        try:
+            payload = jwt.decode(
+                credentials.credentials,
+                settings.jwt_secret,
+                algorithms=["HS256"],
+                issuer="cutwise",
+            )
+        except jwt.PyJWTError as exc:
+            raise HTTPException(status_code=401, detail="Sesja wygasła lub token jest nieprawidłowy.") from exc
+
+        user_id = payload.get("sub")
+        with database.connection() as connection:
+            row = connection.execute(
+                "SELECT id, email, name FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=401, detail="Konto powiązane z sesją nie istnieje.")
+        return dict(row)
+
+    return current_user
