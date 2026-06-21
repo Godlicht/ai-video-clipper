@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlignCenter,
   ArrowLeft,
@@ -32,6 +32,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { api, type ApiProject, type ApiUser } from "./api";
 
 type Screen = "home" | "analysis" | "results";
 type Ratio = "9:16" | "1:1" | "16:9";
@@ -259,6 +260,64 @@ function useDialogFocus(onClose: () => void, escapeDisabled = false) {
   return dialogRef;
 }
 
+export function AuthScreen({
+  onAuthenticated,
+}: {
+  onAuthenticated: (user: ApiUser, token: string) => void;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string>();
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const result = mode === "register"
+        ? await api.register(name, email, password)
+        : await api.login(email, password);
+      onAuthenticated(result.user, result.token);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Nie udało się zalogować.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-screen">
+      <section className="auth-card">
+        <Logo />
+        <span className="eyebrow"><Sparkles size={14} /> CUTWISE WORKSPACE</span>
+        <h1>{mode === "login" ? "Witaj ponownie" : "Utwórz konto"}</h1>
+        <p>Zaloguj się, aby Twoje projekty i przesłane nagrania były zapisywane.</p>
+        <form onSubmit={submit}>
+          {mode === "register" && (
+            <label>Imię<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required minLength={2} /></label>
+          )}
+          <label>E-mail<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>
+          <label>Hasło<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} /></label>
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          <button className="primary-button" type="submit" disabled={submitting}>
+            {submitting && <LoaderCircle size={17} className="spin" />}
+            {mode === "login" ? "Zaloguj się" : "Załóż konto"}
+          </button>
+        </form>
+        <button className="text-button" onClick={() => {
+          setMode(mode === "login" ? "register" : "login");
+          setError(undefined);
+        }}>
+          {mode === "login" ? "Nie masz konta? Zarejestruj się" : "Masz już konto? Zaloguj się"}
+        </button>
+      </section>
+    </main>
+  );
+}
+
 function Logo() {
   return (
     <div className="logo-wrap">
@@ -275,11 +334,15 @@ function Sidebar({
   onNavigate,
   onNewProject,
   clipCount,
+  user,
+  onLogout,
 }: {
   screen: Screen;
   onNavigate: (screen: Screen) => void;
   onNewProject: () => void;
   clipCount: number;
+  user: ApiUser;
+  onLogout: () => void;
 }) {
   return (
     <aside className="sidebar">
@@ -331,12 +394,12 @@ function Sidebar({
       </div>
 
       <div className="profile">
-        <div className="avatar">JK</div>
+        <div className="avatar">{user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div>
         <div>
-          <strong>Jakub Kowalski</strong>
-          <span>Plan Creator</span>
+          <strong>{user.name}</strong>
+          <span>{user.email}</span>
         </div>
-        <MoreHorizontal size={18} />
+        <button className="profile-logout" onClick={onLogout} aria-label="Wyloguj się" title="Wyloguj się"><X size={17} /></button>
       </div>
     </aside>
   );
@@ -364,9 +427,13 @@ function Topbar({ title, subtitle }: { title: string; subtitle?: string }) {
 function HomeScreen({
   onFile,
   onDemo,
+  user,
+  projects,
 }: {
   onFile: (file: File) => Promise<string | undefined>;
   onDemo: () => void;
+  user: ApiUser;
+  projects: ApiProject[];
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -396,7 +463,7 @@ function HomeScreen({
 
   return (
     <main className="content">
-      <Topbar title="Dzień dobry, Jakub 👋" subtitle="Zamień długie nagranie w klipy, które zatrzymują uwagę." />
+      <Topbar title={`Dzień dobry, ${user.name.split(" ")[0]} 👋`} subtitle="Zamień długie nagranie w klipy, które zatrzymują uwagę." />
       <section className="home-body">
         <div className="hero-copy">
           <span className="eyebrow"><Sparkles size={14} /> AI VIDEO CLIPPER</span>
@@ -457,43 +524,34 @@ function HomeScreen({
         </div>
 
         <div className="project-grid">
-          <button className="project-card" onClick={onDemo}>
-            <div className="project-thumb scene-purple">
-              <span className="duration-badge">30:34</span>
-              <div className="person person-one" />
-              <div className="person person-two" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Jak zbudować produkt, którego ludzie chcą</h4>
-              <p>4 klipy · dzisiaj, 09:42</p>
-            </div>
-          </button>
-          <button className="project-card muted-card" onClick={onDemo}>
-            <div className="project-thumb scene-blue">
-              <span className="duration-badge">52:18</span>
-              <div className="abstract-mic" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Podcast: przyszłość pracy z AI</h4>
-              <p>7 klipów · 18 cze, 15:20</p>
-            </div>
-          </button>
-          <button className="project-card muted-card" onClick={onDemo}>
-            <div className="project-thumb scene-green">
-              <span className="duration-badge">18:05</span>
-              <div className="abstract-screen" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Demo produktu — czerwiec 2026</h4>
-              <p>3 klipy · 15 cze, 12:08</p>
-            </div>
-          </button>
+          {projects.slice(0, 3).map((project, index) => (
+            <article className="project-card" key={project.id}>
+              <div className={`project-thumb ${["scene-purple", "scene-blue", "scene-green"][index % 3]}`}>
+                <span className="duration-badge">{project.durationSeconds ? fmt(project.durationSeconds) : "—:—"}</span>
+                <div className="abstract-screen" />
+              </div>
+              <div className="project-info">
+                <span className="status-ready"><Check size={12} /> {project.status === "uploaded" ? "Wgrano" : "Oczekuje na analizę"}</span>
+                <h4>{project.title}</h4>
+                <p>{(project.sizeBytes / 1024 / 1024).toFixed(1)} MB · {new Date(project.createdAt).toLocaleString("pl-PL")}</p>
+              </div>
+            </article>
+          ))}
+          {!projects.length && (
+            <button className="project-card" onClick={onDemo}>
+              <div className="project-thumb scene-purple">
+                <span className="duration-badge">30:34</span>
+                <div className="person person-one" />
+                <div className="person person-two" />
+                <div className="play-circle"><Play size={18} fill="currentColor" /></div>
+              </div>
+              <div className="project-info">
+                <span className="status-ready"><Sparkles size={12} /> Demo</span>
+                <h4>Zobacz przykładowy projekt Cutwise</h4>
+                <p>4 demonstracyjne klipy</p>
+              </div>
+            </button>
+          )}
         </div>
       </section>
     </main>
@@ -1183,6 +1241,13 @@ function ExportModal({
 }
 
 export default function App() {
+  const testMode = import.meta.env.MODE === "test";
+  const [user, setUser] = useState<ApiUser | null>(
+    testMode ? { id: "test-user", name: "Jakub", email: "test@example.com" } : null,
+  );
+  const [token, setToken] = useState(() => testMode ? "test-token" : localStorage.getItem("cutwise_token"));
+  const [authLoading, setAuthLoading] = useState(!testMode && Boolean(token));
+  const [projects, setProjects] = useState<ApiProject[]>([]);
   const [screen, setScreen] = useState<Screen>("home");
   const [clips, setClips] = useState(cloneInitialClips);
   const [fileName, setFileName] = useState("Jak zbudować produkt, którego ludzie chcą.mp4");
@@ -1191,9 +1256,51 @@ export default function App() {
   const [mobileMenu, setMobileMenu] = useState(false);
   const uploadGenerationRef = useRef(0);
 
+  const loadProjects = useCallback(async (activeToken: string) => {
+    const response = await api.listProjects(activeToken);
+    setProjects(response.projects);
+  }, []);
+
+  useEffect(() => {
+    if (!token || testMode) return;
+    let active = true;
+    Promise.all([api.me(token), api.listProjects(token)])
+      .then(([profile, projectList]) => {
+        if (!active) return;
+        setUser(profile.user);
+        setProjects(projectList.projects);
+      })
+      .catch(() => {
+        if (!active) return;
+        localStorage.removeItem("cutwise_token");
+        setToken(null);
+        setUser(null);
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    return () => { active = false; };
+  }, [testMode, token]);
+
   useEffect(() => () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
   }, [videoUrl]);
+
+  const handleAuthenticated = (nextUser: ApiUser, nextToken: string) => {
+    localStorage.setItem("cutwise_token", nextToken);
+    setToken(nextToken);
+    setUser(nextUser);
+    setAuthLoading(false);
+    void loadProjects(nextToken).catch(() => setProjects([]));
+  };
+
+  const logout = () => {
+    localStorage.removeItem("cutwise_token");
+    setToken(null);
+    setUser(null);
+    setProjects([]);
+    resetProject();
+  };
 
   const handleFile = async (file: File) => {
     const validationError = validateVideoFile(file);
@@ -1220,6 +1327,26 @@ export default function App() {
       return "Film przekracza maksymalną długość 3 godzin.";
     }
 
+    if (!token) {
+      URL.revokeObjectURL(nextVideoUrl);
+      return "Zaloguj się ponownie przed wysłaniem projektu.";
+    }
+
+    let persistedProject: ApiProject;
+    try {
+      const response = await api.createProject(token, file);
+      persistedProject = response.project;
+    } catch (error) {
+      URL.revokeObjectURL(nextVideoUrl);
+      return error instanceof Error ? error.message : "Nie udało się zapisać projektu.";
+    }
+
+    if (uploadGeneration !== uploadGenerationRef.current) {
+      URL.revokeObjectURL(nextVideoUrl);
+      return undefined;
+    }
+
+    setProjects((current) => [persistedProject, ...current.filter((project) => project.id !== persistedProject.id)]);
     setFileName(file.name);
     setVideoDuration(duration);
     setClips(clipsForDuration(duration));
@@ -1247,16 +1374,24 @@ export default function App() {
     setScreen("home");
   };
 
+  if (authLoading) {
+    return <main className="auth-screen"><LoaderCircle size={34} className="spin" /></main>;
+  }
+
+  if (!user || !token) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className="app-shell">
       <button className="mobile-menu-button" onClick={() => setMobileMenu(!mobileMenu)} aria-label="Otwórz menu"><Menu size={20} /></button>
       <div className={mobileMenu ? "sidebar-mobile open" : "sidebar-mobile"} onClick={() => setMobileMenu(false)}>
         <div onClick={(event) => event.stopPropagation()}>
-          <Sidebar screen={screen} clipCount={clips.length} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} onNewProject={resetProject} />
+          <Sidebar screen={screen} clipCount={clips.length} user={user} onLogout={logout} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} onNewProject={resetProject} />
         </div>
       </div>
-      <Sidebar screen={screen} clipCount={clips.length} onNavigate={setScreen} onNewProject={resetProject} />
-      {screen === "home" && <HomeScreen onFile={handleFile} onDemo={loadDemo} />}
+      <Sidebar screen={screen} clipCount={clips.length} user={user} onLogout={logout} onNavigate={setScreen} onNewProject={resetProject} />
+      {screen === "home" && <HomeScreen onFile={handleFile} onDemo={loadDemo} user={user} projects={projects} />}
       {screen === "analysis" && (
         <AnalysisScreen
           fileName={fileName}

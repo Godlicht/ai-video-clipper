@@ -1,23 +1,52 @@
 # Cutwise — AI Video Clipper
 
-Interaktywny prototyp aplikacji SaaS, która analizuje długie nagrania i proponuje krótkie klipy gotowe do publikacji w social mediach.
+Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w krótkie klipy. Repozytorium zawiera frontend React oraz backend Node/Express z trwałą bazą SQLite.
+
+## Aktualnie działa
+
+- rejestracja i logowanie z hasłami przechowywanymi jako bezpieczne hashe,
+- sesje JWT i prywatne projekty izolowane między użytkownikami,
+- trwały upload plików MP4, MOV i WebM,
+- historia projektów zapisywana w SQLite,
+- odczyt długości filmu przez FFprobe,
+- edytor zakresu klipu, ustawienia renderu i eksport manifestu,
+- automatyczne testy frontendu i API.
+
+Analiza AI, transkrypcja oraz finalne renderowanie MP4 są implementowane w kolejnych etapach.
+
+## Wymagania
+
+- Node.js 20+,
+- FFmpeg i FFprobe dostępne w `PATH` albo wskazane przez `FFMPEG_PATH` i `FFPROBE_PATH`.
+
+Na Windows backend automatycznie wykrywa również instalację `Gyan.FFmpeg` wykonaną przez WinGet.
 
 ## Uruchomienie
 
 ```bash
 npm install
+copy .env.example .env
 npm run dev
 ```
 
-## Zakres prototypu
+Frontend: `http://127.0.0.1:5173`
 
-- upload MP4, MOV i WebM metodą drag & drop,
-- ekran wieloetapowej analizy AI,
-- lista rekomendowanych klipów wraz ze scoringiem i uzasadnieniem,
-- wybór oraz odrzucanie klipów,
-- edytor początku i końca klipu,
-- wybór formatu 9:16, 1:1 i 16:9,
-- konfiguracja eksportu i demonstracyjny manifest renderowania,
-- responsywny interfejs desktop/mobile.
+API: `http://127.0.0.1:8787`
 
-Pełna specyfikacja produktu, architektura systemu, model danych, API i plan MVP znajdują się w [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md).
+Podczas developmentu Vite przekazuje `/api` do backendu.
+
+## Komendy jakości
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+## Dane lokalne
+
+- baza: `data/cutwise.sqlite`,
+- źródłowe nagrania: `uploads/`,
+- wyrenderowane klipy: `exports/`.
+
+Katalogi te są ignorowane przez Git. Pełna architektura docelowego produktu znajduje się w [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md).

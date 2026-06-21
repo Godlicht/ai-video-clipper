@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
-import App, { AnalysisScreen, VideoScene } from "./App";
+import App, { AnalysisScreen, AuthScreen, VideoScene } from "./App";
+import { api } from "./api";
 
 const openDemoResults = async () => {
   const user = userEvent.setup();
@@ -12,6 +13,28 @@ const openDemoResults = async () => {
 };
 
 describe("Cutwise prototype", () => {
+  it("rejestruje użytkownika z ekranu konta", async () => {
+    const user = userEvent.setup();
+    const onAuthenticated = vi.fn();
+    vi.spyOn(api, "register").mockResolvedValue({
+      user: { id: "user-1", name: "Jakub", email: "jakub@example.com" },
+      token: "token-1",
+    });
+    render(<AuthScreen onAuthenticated={onAuthenticated} />);
+
+    await user.click(screen.getByRole("button", { name: /Zarejestruj się/i }));
+    await user.type(screen.getByLabelText("Imię"), "Jakub");
+    await user.type(screen.getByLabelText("E-mail"), "jakub@example.com");
+    await user.type(screen.getByLabelText("Hasło"), "bezpieczne-haslo");
+    await user.click(screen.getByRole("button", { name: "Załóż konto" }));
+
+    expect(api.register).toHaveBeenCalledWith("Jakub", "jakub@example.com", "bezpieczne-haslo");
+    expect(onAuthenticated).toHaveBeenCalledWith(
+      { id: "user-1", name: "Jakub", email: "jakub@example.com" },
+      "token-1",
+    );
+  });
+
   it("czyści timer zakończenia analizy po odmontowaniu w StrictMode", () => {
     vi.useFakeTimers();
     const onComplete = vi.fn();
