@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
 import App, { AnalysisScreen, AuthScreen, VideoScene } from "./App";
-import { api } from "./api";
+import { api, type ApiProject } from "./api";
 
 const openDemoResults = async () => {
   const user = userEvent.setup();
@@ -251,14 +251,11 @@ describe("Cutwise prototype", () => {
 
   it("ignoruje zakończenie nieaktualnego uploadu po resecie projektu", async () => {
     const user = userEvent.setup();
-    const nativeCreateElement = document.createElement.bind(document);
-    let metadataVideo: HTMLVideoElement | undefined;
-    vi.spyOn(document, "createElement").mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
-      const element = nativeCreateElement(tagName, options);
-      if (tagName.toLowerCase() === "video") metadataVideo = element as HTMLVideoElement;
-      return element;
-    }) as typeof document.createElement);
     const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    let finishUpload!: (value: { project: ApiProject }) => void;
+    vi.spyOn(api, "createProject").mockImplementation(() => new Promise((resolve) => {
+      finishUpload = resolve;
+    }));
 
     render(<App />);
     const input = document.querySelector<HTMLInputElement>('input[type="file"]');
@@ -268,9 +265,21 @@ describe("Cutwise prototype", () => {
 
     const newProjectButtons = screen.getAllByRole("button", { name: /Nowy projekt/i });
     await user.click(newProjectButtons[newProjectButtons.length - 1]);
-    expect(metadataVideo).toBeDefined();
-    Object.defineProperty(metadataVideo!, "duration", { configurable: true, value: 60 });
-    metadataVideo!.onloadedmetadata?.(new Event("loadedmetadata"));
+    finishUpload({
+      project: {
+        id: "late-project",
+        title: "pending",
+        status: "uploaded",
+        sourceFilename: "pending.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 5,
+        durationSeconds: 60,
+        errorMessage: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        mediaUrl: "/api/projects/late-project/media",
+      },
+    });
 
     await waitFor(() => {
       expect(screen.getByText("Dzień dobry, Jakub 👋")).toBeInTheDocument();
@@ -281,14 +290,7 @@ describe("Cutwise prototype", () => {
 
   it("anuluje aktywny request uploadu po otwarciu demo", async () => {
     const user = userEvent.setup();
-    const nativeCreateElement = document.createElement.bind(document);
-    let metadataVideo: HTMLVideoElement | undefined;
     let uploadSignal: AbortSignal | undefined;
-    vi.spyOn(document, "createElement").mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
-      const element = nativeCreateElement(tagName, options);
-      if (tagName.toLowerCase() === "video") metadataVideo = element as HTMLVideoElement;
-      return element;
-    }) as typeof document.createElement);
     vi.spyOn(api, "createProject").mockImplementation((_token, _file, _title, signal) => {
       uploadSignal = signal;
       return new Promise(() => undefined);
@@ -299,8 +301,6 @@ describe("Cutwise prototype", () => {
     fireEvent.change(input!, {
       target: { files: [new File(["video"], "pending.mp4", { type: "video/mp4" })] },
     });
-    Object.defineProperty(metadataVideo!, "duration", { configurable: true, value: 60 });
-    metadataVideo!.onloadedmetadata?.(new Event("loadedmetadata"));
     await waitFor(() => expect(api.createProject).toHaveBeenCalled());
 
     await user.click(screen.getByRole("button", { name: /Otwórz demo/i }));

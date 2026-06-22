@@ -144,7 +144,6 @@ const fmt = (seconds: number) => {
 
 const DEMO_DURATION = 30 * 60 + 34;
 const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;
-const MAX_VIDEO_DURATION = 3 * 60 * 60;
 const SUPPORTED_VIDEO_EXTENSIONS = /\.(mp4|mov|webm)$/i;
 
 const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } }));
@@ -1362,24 +1361,6 @@ export default function App() {
 
     const uploadGeneration = ++uploadGenerationRef.current;
     const nextVideoUrl = URL.createObjectURL(file);
-    let duration: number;
-    try {
-      duration = await readVideoDuration(nextVideoUrl);
-    } catch (error) {
-      URL.revokeObjectURL(nextVideoUrl);
-      if (uploadGeneration !== uploadGenerationRef.current) return undefined;
-      return error instanceof Error ? error.message : "Nie udało się przygotować filmu.";
-    }
-
-    if (uploadGeneration !== uploadGenerationRef.current) {
-      URL.revokeObjectURL(nextVideoUrl);
-      return undefined;
-    }
-
-    if (duration > MAX_VIDEO_DURATION) {
-      URL.revokeObjectURL(nextVideoUrl);
-      return "Film przekracza maksymalną długość 3 godzin.";
-    }
 
     if (!token) {
       URL.revokeObjectURL(nextVideoUrl);
@@ -1412,7 +1393,7 @@ export default function App() {
 
     setProjects((current) => [persistedProject, ...current.filter((project) => project.id !== persistedProject.id)]);
     setFileName(file.name);
-    setVideoDuration(duration);
+    setVideoDuration(persistedProject.durationSeconds ?? 0);
     setActiveProjectId(persistedProject.id);
     setClips([]);
     setVideoUrl(nextVideoUrl);
