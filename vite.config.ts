@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8787",
-      "/media": "http://127.0.0.1:8787",
+      "/api": "http://127.0.0.1:8788",
+      "/media": "http://127.0.0.1:8788",
     },
   },
   test: {

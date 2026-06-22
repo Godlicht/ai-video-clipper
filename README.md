@@ -40,7 +40,7 @@ npm run dev
 
 Frontend: `http://127.0.0.1:5173`
 
-API: `http://127.0.0.1:8787`
+API: `http://127.0.0.1:8788`
 
 Podczas developmentu Vite przekazuje `/api` do backendu.
 

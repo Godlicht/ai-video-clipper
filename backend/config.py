@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    port: int = 8787
+    port: int = 8788
     jwt_secret: str | None = None
     database_path: Path = Path("./data/cutwise.sqlite")
     upload_dir: Path = Path("./uploads")
