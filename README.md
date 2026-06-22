@@ -30,6 +30,23 @@ Na Windows backend automatycznie wykrywa również instalację `Gyan.FFmpeg` wyk
 
 ## Uruchomienie
 
+### Docker — najprostsza kopia przenośna
+
+Na Windows zainstaluj Docker Desktop, rozpakuj paczkę i uruchom
+`start-docker.cmd`. Skrypt:
+
+- wygeneruje prywatny sekret sesji,
+- zbuduje frontend i backend,
+- zainstaluje wewnątrz kontenera Python, zależności oraz FFmpeg,
+- uruchomi aplikację pod `http://localhost:5173`.
+
+Dane użytkowników, wgrane filmy i eksporty są zachowywane w katalogu
+`runtime/`. Aktualizacja lub restart kontenerów ich nie usuwa.
+
+Zatrzymanie aplikacji: `stop-docker.cmd`.
+
+### Uruchomienie bez Dockera
+
 ```bash
 npm install
 python -m venv .venv

@@ -8,6 +8,8 @@ dist-server
 data
 uploads
 exports
+runtime
+backups
 .env
 .env.*
 !.env.example

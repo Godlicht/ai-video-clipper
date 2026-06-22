@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_PATH: /app/runtime/data/cutwise.sqlite
+      UPLOAD_DIR: /app/runtime/uploads
+      EXPORT_DIR: /app/runtime/exports
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
+      PORT: "8788"
+    volumes:
+      - ./runtime:/app/runtime
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    restart: unless-stopped
