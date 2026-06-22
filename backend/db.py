@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS exports (
   completed_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS clip_generation_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  start_seconds REAL NOT NULL,
+  end_seconds REAL NOT NULL,
+  prompt TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_clip_history_project
+  ON clip_generation_history(project_id, created_at);
+
 CREATE TABLE IF NOT EXISTS pending_file_deletions (
   project_id TEXT PRIMARY KEY,
   source_path TEXT NOT NULL,

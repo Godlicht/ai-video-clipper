@@ -104,8 +104,17 @@ export const api = {
   getProjectMediaUrl: (token: string, projectId: string) =>
     apiRequest<{ url: string }>(`/api/projects/${projectId}/media-access`, { method: "POST" }, token),
 
-  analyzeProject: (token: string, projectId: string) =>
-    apiRequest<{ clips: ApiClip[] }>(`/api/projects/${projectId}/analysis`, { method: "POST" }, token),
+  analyzeProject: (
+    token: string,
+    projectId: string,
+    options: { prompt?: string; minClipSeconds?: number; maxClipSeconds?: number } = {},
+    signal?: AbortSignal,
+  ) =>
+    apiRequest<{ clips: ApiClip[] }>(`/api/projects/${projectId}/analysis`, {
+      method: "POST",
+      body: JSON.stringify(options),
+      signal,
+    }, token),
 
   listClips: (token: string, projectId: string) =>
     apiRequest<{ clips: ApiClip[] }>(`/api/projects/${projectId}/clips`, {}, token),
@@ -115,6 +124,7 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({
         title: clip.title,
+        transcript: clip.transcript,
         startSeconds: clip.start,
         endSeconds: clip.end,
         selected: clip.selected,

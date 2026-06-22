@@ -11,13 +11,19 @@ Cutwise jest rozwijanym lokalnym MVP aplikacji do zamiany długich nagrań w kr�
 - strumieniowanie nagrań z historii przez krótkotrwałe podpisane adresy URL i HTTP Range,
 - odczyt długości filmu przez FFprobe,
 - trwałe propozycje klipów generowane dla każdego nagrania,
+- własny prompt analizy i wybór zakresu długości klipów 15–180 sekund,
+- historia wykorzystanych zakresów, dzięki której ponowna analiza proponuje inne fragmenty,
+- opcjonalna transkrypcja OpenAI po ustawieniu `OPENAI_API_KEY`,
+- przewijanie podglądu, skoki ±10 sekund i odtwarzanie do 2×,
+- edycja transkrypcji oraz podgląd i eksport automatycznych napisów,
 - edytor zakresu klipu i ustawienia renderu zapisywane w SQLite,
 - rzeczywiste renderowanie i pobieranie MP4 przez FFmpeg,
 - automatyczne testy frontendu i API.
 
-Bez klucza zewnętrznego aplikacja używa lokalnej analizy bazowej, która rozkłada
-propozycje w przebiegu nagrania. Transkrypcja i semantyczne wybieranie momentów
-przez modele AI pozostają kolejnym etapem jakościowym; upload, edycja i eksport
+Bez klucza zewnętrznego aplikacja używa lokalnej analizy bazowej, która uwzględnia
+prompt, preferowaną długość i wcześniej proponowane zakresy. Po ustawieniu
+`OPENAI_API_KEY` backend wydziela audio dla kandydatów i tworzy transkrypcję przez
+model wskazany w `OPENAI_TRANSCRIPTION_MODEL`. Upload, edycja i eksport nadal
 działają lokalnie bez usług zewnętrznych.
 
 ## Wymagania

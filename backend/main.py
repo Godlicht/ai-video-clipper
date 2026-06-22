@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import shutil
@@ -30,7 +31,7 @@ from .config import Settings, settings as default_settings
 from .db import Database
 from .media import MediaInfo, format_matches_extension, probe_media, resolve_media_tool
 from .middleware import RequestSizeLimitMiddleware, RequestTooLarge
-from .processing import generate_clip_candidates, render_clip
+from .processing import generate_clip_candidates, render_clip, transcribe_clip
 
 
 logger = logging.getLogger("cutwise")
@@ -61,6 +62,7 @@ class RenderConfigRequest(BaseModel):
 
 class ClipPatchRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
+    transcript: str | None = Field(default=None, max_length=20_000)
     startSeconds: float | None = Field(default=None, ge=0)
     endSeconds: float | None = Field(default=None, gt=0)
     selected: bool | None = None
@@ -71,6 +73,12 @@ class ExportRequest(BaseModel):
     startSeconds: float = Field(ge=0)
     endSeconds: float = Field(gt=0)
     renderConfig: RenderConfigRequest
+
+
+class AnalysisRequest(BaseModel):
+    prompt: str = Field(default="", max_length=800)
+    minClipSeconds: float = Field(default=20, ge=8, le=180)
+    maxClipSeconds: float = Field(default=90, ge=8, le=240)
 
 
 def now_iso() -> str:
@@ -110,7 +118,7 @@ def serialize_clip(row: sqlite3.Row) -> dict:
 
 
 ProbeFunction = Callable[[Path, str], Awaitable[MediaInfo | None]]
-RenderFunction = Callable[[str, Path, Path, float, float, str, str], Awaitable[None]]
+RenderFunction = Callable[..., Awaitable[None]]
 
 
 def cleanup_pending_files(database: Database) -> None:
@@ -360,31 +368,60 @@ def create_app(
     @app.post("/api/projects/{project_id}/analysis")
     async def analyze_project(
         project_id: str,
+        payload: AnalysisRequest | None = None,
         user: dict[str, str] = Depends(current_user),
     ) -> dict:
+        analysis = payload or AnalysisRequest()
+        if analysis.maxClipSeconds < analysis.minClipSeconds:
+            raise HTTPException(status_code=400, detail="Maksymalna długość klipu musi być większa od minimalnej.")
         lock = project_lock(project_id)
         if lock.locked():
-            raise HTTPException(status_code=409, detail="Projekt jest obecnie renderowany.")
+            raise HTTPException(status_code=409, detail="Projekt jest obecnie przetwarzany.")
         async with lock:
             with database.connection() as connection:
                 project = connection.execute(
-                    "SELECT duration_seconds FROM projects WHERE id = ? AND user_id = ?",
+                    "SELECT duration_seconds, source_path FROM projects WHERE id = ? AND user_id = ?",
                     (project_id, user["id"]),
                 ).fetchone()
+                history = connection.execute(
+                    "SELECT start_seconds, end_seconds FROM clip_generation_history WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
             if project is None:
                 raise HTTPException(status_code=404, detail="Projekt nie istnieje.")
 
-            candidates = generate_clip_candidates(float(project["duration_seconds"] or 0))
+            candidates = generate_clip_candidates(
+                float(project["duration_seconds"] or 0),
+                prompt=analysis.prompt,
+                min_length=analysis.minClipSeconds,
+                max_length=analysis.maxClipSeconds,
+                excluded_ranges=[(row["start_seconds"], row["end_seconds"]) for row in history],
+            )
+            transcripts = [""] * len(candidates)
+            if app_settings.openai_api_key:
+                for index, candidate in enumerate(candidates):
+                    try:
+                        transcripts[index] = await transcribe_clip(
+                            ffmpeg_path,
+                            Path(project["source_path"]),
+                            candidate.start,
+                            candidate.end,
+                            app_settings.openai_api_key,
+                            app_settings.openai_transcription_model,
+                            analysis.prompt,
+                        )
+                    except Exception:
+                        logger.exception("Nie udało się wygenerować transkrypcji klipu")
             timestamp = now_iso()
             with database.connection() as connection:
                 connection.execute("DELETE FROM clips WHERE project_id = ?", (project_id,))
-                for candidate in candidates:
+                for index, candidate in enumerate(candidates):
                     connection.execute(
                         """
                         INSERT INTO clips (
                           id, project_id, title, description, reason, start_seconds,
                           end_seconds, score, transcript, selected, render_config, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                         """,
                         (
                             str(uuid4()),
@@ -395,6 +432,7 @@ def create_app(
                             candidate.start,
                             candidate.end,
                             candidate.score,
+                            transcripts[index],
                             json.dumps(
                                 {
                                     "ratio": "9:16",
@@ -405,6 +443,14 @@ def create_app(
                             ),
                             timestamp,
                         ),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO clip_generation_history (
+                          project_id, start_seconds, end_seconds, prompt, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (project_id, candidate.start, candidate.end, analysis.prompt, timestamp),
                     )
                 connection.execute(
                     "UPDATE projects SET status = 'ready', error_message = NULL, updated_at = ? WHERE id = ?",
@@ -464,11 +510,12 @@ def create_app(
         with database.connection() as connection:
             connection.execute(
                 """
-                UPDATE clips SET title = ?, start_seconds = ?, end_seconds = ?,
+                UPDATE clips SET title = ?, transcript = ?, start_seconds = ?, end_seconds = ?,
                   selected = ?, render_config = ? WHERE id = ?
                 """,
                 (
                     payload.title or row["title"],
+                    payload.transcript if payload.transcript is not None else row["transcript"],
                     start,
                     end,
                     int(payload.selected if payload.selected is not None else bool(row["selected"])),
@@ -502,7 +549,7 @@ def create_app(
             with database.connection() as connection:
                 row = connection.execute(
                     """
-                    SELECT clips.project_id, projects.source_path, projects.duration_seconds
+                    SELECT clips.project_id, clips.transcript, projects.source_path, projects.duration_seconds
                     FROM clips JOIN projects ON projects.id = clips.project_id
                     WHERE clips.id = ? AND projects.user_id = ?
                     """,
@@ -527,7 +574,7 @@ def create_app(
                     (export_id, row["project_id"], clip_id, str(output), json.dumps(render_config), timestamp),
                 )
             try:
-                await render_function(
+                render_arguments = [
                     ffmpeg_path,
                     Path(row["source_path"]),
                     output,
@@ -535,7 +582,13 @@ def create_app(
                     payload.endSeconds,
                     render_config["ratio"],
                     render_config["quality"],
-                )
+                ]
+                if len(inspect.signature(render_function).parameters) >= 9:
+                    render_arguments.extend([
+                        render_config["captionsEnabled"],
+                        row["transcript"],
+                    ])
+                await render_function(*render_arguments)
             except asyncio.CancelledError:
                 with database.connection() as connection:
                     connection.execute(

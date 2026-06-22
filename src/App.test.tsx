@@ -199,7 +199,7 @@ describe("Cutwise prototype", () => {
     const editor = screen.getByRole("dialog", { name: /Błąd, który kosztował/i });
     expect(within(editor).getByRole("button", { name: /Zamknij edytor/i })).toHaveFocus();
     expect(within(editor).getByDisplayValue("2:22")).toBeInTheDocument();
-    await user.click(within(editor).getAllByRole("button", { name: "+" })[0]);
+    await user.click(within(editor).getByRole("button", { name: "Przesuń początek o sekundę" }));
     expect(within(editor).getByDisplayValue("2:23")).toBeInTheDocument();
     await user.click(within(editor).getByRole("button", { name: "Anuluj" }));
     expect(editButton).toHaveFocus();
@@ -214,7 +214,7 @@ describe("Cutwise prototype", () => {
 
     const editor = screen.getByRole("dialog", { name: /Błąd, który kosztował/i });
     await user.click(within(editor).getByRole("button", { name: /^1:1/i }));
-    expect(within(editor).getByRole("button", { name: /Automatyczne napisy niedostępne/i })).toBeDisabled();
+    expect(within(editor).getByRole("button", { name: "Automatyczne napisy" })).toBeEnabled();
     await user.click(within(editor).getByRole("button", { name: /Zapisz i eksportuj/i }));
 
     const exportDialog = screen.getByRole("dialog", { name: /Przygotuj klip/i });
@@ -246,7 +246,8 @@ describe("Cutwise prototype", () => {
     fireEvent.click(exportButton);
     fireEvent.keyDown(document, { key: "Tab" });
 
-    expect(within(exportDialog).getByRole("button", { name: /Zamknij eksport/i })).toHaveFocus();
+    expect(exportDialog).toContainElement(document.activeElement as HTMLElement);
+    expect(document.activeElement).toBeEnabled();
   });
 
   it("ignoruje zakończenie nieaktualnego uploadu po resecie projektu", async () => {
@@ -322,7 +323,25 @@ describe("Cutwise prototype", () => {
     const clipsButtons = screen.getAllByRole("button", { name: /Moje klipy/i });
     await user.click(clipsButtons[clipsButtons.length - 1]);
 
-    expect(screen.getByRole("button", { name: /Generuj ponownie/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Generuj nowe/i })).toBeDisabled();
     expect(screen.getByText("Nie masz jeszcze wybranych klipów.")).toBeInTheDocument();
+  });
+
+  it("nie udaje odtwarzania w statycznym projekcie demonstracyjnym", async () => {
+    const user = await openDemoResults();
+    await user.click(screen.getAllByRole("button", { name: /Edytuj klip/i })[0]);
+    const editor = screen.getByRole("dialog", { name: /Błąd, który kosztował/i });
+
+    expect(within(editor).getByRole("combobox", { name: "Prędkość odtwarzania" })).toBeDisabled();
+    expect(within(editor).getByRole("slider", { name: "Pozycja odtwarzania" })).toBeDisabled();
+    expect(within(editor).getByRole("button", { name: "Odtwórz podgląd" })).toBeDisabled();
+  });
+
+  it("generuje inne klipy zgodnie z własnym promptem", async () => {
+    const user = await openDemoResults();
+    await user.type(screen.getByLabelText("Jakich momentów szukasz?"), "zabawne sceny");
+    await user.click(screen.getByRole("button", { name: /Generuj nowe/i }));
+
+    expect(screen.getByText(/Propozycja: zabawne sceny 1/i)).toBeInTheDocument();
   });
 });

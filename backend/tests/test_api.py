@@ -214,6 +214,27 @@ def test_analysis_persists_clips_and_allows_updates(api):
     assert updated.json()["clip"]["renderConfig"]["ratio"] == "1:1"
 
 
+def test_reanalysis_uses_prompt_length_preferences_and_new_ranges(api):
+    client, _database, _settings = api
+    token = register(client)
+    project = upload(client, token, "regenerate.mp4", b"video", "video/mp4").json()["project"]
+
+    first = client.post(
+        f"/api/projects/{project['id']}/analysis",
+        headers=auth(token),
+        json={"prompt": "najmocniejsze cytaty", "minClipSeconds": 20, "maxClipSeconds": 45},
+    ).json()["clips"]
+    second = client.post(
+        f"/api/projects/{project['id']}/analysis",
+        headers=auth(token),
+        json={"prompt": "najmocniejsze cytaty", "minClipSeconds": 20, "maxClipSeconds": 45},
+    ).json()["clips"]
+
+    assert first[0]["title"].startswith("Mocny cytat")
+    assert 20 <= first[0]["end"] - first[0]["start"] <= 45
+    assert (first[0]["start"], first[0]["end"]) != (second[0]["start"], second[0]["end"])
+
+
 def test_export_renders_and_downloads_private_mp4(tmp_path: Path):
     settings = Settings(
         jwt_secret="test-secret-with-enough-entropy-" * 2,
