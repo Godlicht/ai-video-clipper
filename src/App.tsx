@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlignCenter,
   ArrowLeft,
@@ -32,12 +32,22 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { api, type ApiClip, type ApiProject, type ApiUser } from "./api";
 
 type Screen = "home" | "analysis" | "results";
 type Ratio = "9:16" | "1:1" | "16:9";
+type Quality = "720p" | "1080p" | "4K";
+
+type RenderConfig = {
+  ratio: Ratio;
+  quality: Quality;
+  captionsEnabled: boolean;
+  trackingEnabled: boolean;
+};
 
 type Clip = {
-  id: number;
+  id: string | number;
+  projectId?: string;
   title: string;
   description: string;
   reason: string;
@@ -49,6 +59,7 @@ type Clip = {
   transcript: string;
   selected: boolean;
   accent: string;
+  renderConfig: RenderConfig;
 };
 
 const initialClips: Clip[] = [
@@ -66,6 +77,7 @@ const initialClips: Clip[] = [
       "Największy błąd? Przez trzy miesiące budowaliśmy funkcję, której nikt nie potrzebował. Dopiero jedna rozmowa z klientem sprawiła, że wszystko stało się oczywiste.",
     selected: true,
     accent: "scene-purple",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 2,
@@ -81,6 +93,7 @@ const initialClips: Clip[] = [
       "Zapytałem: za co naprawdę płacisz? Nie za więcej funkcji. Za spokój, że praca zostanie wykonana na czas. To jedno pytanie zmieniło naszą strategię.",
     selected: true,
     accent: "scene-blue",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 3,
@@ -96,6 +109,7 @@ const initialClips: Clip[] = [
       "I wtedy zobaczyliśmy pierwszy raport. Wynik był dwa razy lepszy, niż zakładaliśmy. W pokoju zapadła cisza, a potem wszyscy zaczęli się śmiać.",
     selected: false,
     accent: "scene-orange",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
   {
     id: 4,
@@ -111,6 +125,7 @@ const initialClips: Clip[] = [
       "Dobry produkt nie zmusza użytkownika, żeby nauczył się waszej logiki. To produkt powinien nauczyć się logiki użytkownika.",
     selected: false,
     accent: "scene-green",
+    renderConfig: { ratio: "9:16", quality: "1080p", captionsEnabled: false, trackingEnabled: false },
   },
 ];
 
@@ -127,6 +142,207 @@ const fmt = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
+const DEMO_DURATION = 30 * 60 + 34;
+const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024;
+const SUPPORTED_VIDEO_EXTENSIONS = /\.(mp4|mov|webm)$/i;
+
+const cloneInitialClips = () => initialClips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } }));
+
+const clipsForDuration = (
+  duration = DEMO_DURATION,
+  previousClips: Clip[] = [],
+  options: { prompt?: string; minClipSeconds?: number; maxClipSeconds?: number } = {},
+) => {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+
+  const minLength = Math.min(duration, Math.max(8, options.minClipSeconds ?? 20));
+  const maxLength = Math.min(duration, Math.max(minLength, options.maxClipSeconds ?? 90));
+  const shift = previousClips.length
+    ? Math.max(maxLength, Math.round(duration / (previousClips.length + 2)))
+    : 0;
+  const prompt = options.prompt?.trim();
+  return initialClips.map((clip, index) => {
+    const source = previousClips[index] ?? clip;
+    const length = Math.min(maxLength, Math.max(minLength, source.end - source.start + (index % 2 ? 8 : -4)));
+    const start = Math.max(0, Math.min((source.start + shift + index * 17) % Math.max(1, duration - length), duration - length));
+    const end = Math.min(duration, start + length);
+    return {
+      ...clip,
+      title: prompt ? `Propozycja: ${prompt.slice(0, 52)} ${index + 1}` : clip.title,
+      reason: prompt ? `Nowy fragment wybrany pod kątem: ${prompt.slice(0, 140)}` : clip.reason,
+      transcript: prompt ? "" : clip.transcript,
+      start,
+      end,
+      selected: false,
+      renderConfig: { ...clip.renderConfig, captionsEnabled: false },
+    };
+  });
+};
+
+const decorateApiClips = (clips: ApiClip[]): Clip[] => clips.map((clip, index) => ({
+  ...clip,
+  tag: index === 0 ? "Najwyższy potencjał" : "Propozycja",
+  tagTone: (["pink", "blue", "amber", "green"] as const)[index % 4],
+  accent: ["scene-purple", "scene-blue", "scene-orange", "scene-green"][index % 4],
+}));
+
+const validateVideoFile = (file: File) => {
+  if (!SUPPORTED_VIDEO_EXTENSIONS.test(file.name)) return "Wybierz plik MP4, MOV lub WebM.";
+  if (file.size > MAX_FILE_SIZE) return "Plik przekracza maksymalny rozmiar 5 GB.";
+  return undefined;
+};
+
+const readVideoDuration = (url: string) =>
+  new Promise<number>((resolve, reject) => {
+    const video = document.createElement("video");
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Nie udało się odczytać długości filmu."));
+    }, 15000);
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeAttribute("src");
+      video.load();
+    };
+
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const duration = video.duration;
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0) reject(new Error("Film ma nieprawidłową długość."));
+      else resolve(duration);
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("Nie można odczytać tego pliku wideo."));
+    };
+    video.src = url;
+  });
+
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
+
+function useDialogFocus(onClose: () => void, escapeDisabled = false) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const escapeDisabledRef = useRef(escapeDisabled);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    escapeDisabledRef.current = escapeDisabled;
+  }, [escapeDisabled, onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const firstFocusable = dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+    (firstFocusable ?? dialog)?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !escapeDisabledRef.current) {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!activeElement || !dialog.contains(activeElement) || !focusable.includes(activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, []);
+
+  return dialogRef;
+}
+
+export function AuthScreen({
+  onAuthenticated,
+}: {
+  onAuthenticated: (user: ApiUser, token: string) => void;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string>();
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const result = mode === "register"
+        ? await api.register(name, email, password)
+        : await api.login(email, password);
+      onAuthenticated(result.user, result.token);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Nie udało się zalogować.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <main className="auth-screen">
+      <section className="auth-card">
+        <Logo />
+        <span className="eyebrow"><Sparkles size={14} /> CUTWISE WORKSPACE</span>
+        <h1>{mode === "login" ? "Witaj ponownie" : "Utwórz konto"}</h1>
+        <p>Zaloguj się, aby Twoje projekty i przesłane nagrania były zapisywane.</p>
+        <form onSubmit={submit}>
+          {mode === "register" && (
+            <label>Imię<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required minLength={2} /></label>
+          )}
+          <label>E-mail<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>
+          <label>Hasło<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} /></label>
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          <button className="primary-button" type="submit" disabled={submitting}>
+            {submitting && <LoaderCircle size={17} className="spin" />}
+            {mode === "login" ? "Zaloguj się" : "Załóż konto"}
+          </button>
+        </form>
+        <button className="text-button" onClick={() => {
+          setMode(mode === "login" ? "register" : "login");
+          setError(undefined);
+        }}>
+          {mode === "login" ? "Nie masz konta? Zarejestruj się" : "Masz już konto? Zaloguj się"}
+        </button>
+      </section>
+    </main>
+  );
+}
+
 function Logo() {
   return (
     <div className="logo-wrap">
@@ -141,14 +357,22 @@ function Logo() {
 function Sidebar({
   screen,
   onNavigate,
+  onNewProject,
+  clipCount,
+  user,
+  onLogout,
 }: {
   screen: Screen;
   onNavigate: (screen: Screen) => void;
+  onNewProject: () => void;
+  clipCount: number;
+  user: ApiUser;
+  onLogout: () => void;
 }) {
   return (
     <aside className="sidebar">
       <Logo />
-      <button className="new-project" onClick={() => onNavigate("home")}>
+      <button className="new-project" onClick={onNewProject}>
         <Plus size={17} />
         Nowy projekt
       </button>
@@ -162,9 +386,9 @@ function Sidebar({
         <button className={screen === "results" ? "active" : ""} onClick={() => onNavigate("results")}>
           <Film size={18} />
           Moje klipy
-          <span className="nav-count">4</span>
+          <span className="nav-count">{clipCount}</span>
         </button>
-        <button>
+        <button onClick={() => onNavigate("home")}>
           <FolderClock size={18} />
           Projekty
         </button>
@@ -172,11 +396,11 @@ function Sidebar({
 
       <nav className="side-nav lower-nav">
         <span className="nav-label">KONTO</span>
-        <button>
+        <button disabled title="Ustawienia pojawią się w kolejnej wersji">
           <Settings size={18} />
           Ustawienia
         </button>
-        <button>
+        <button disabled title="Centrum pomocy pojawi się w kolejnej wersji">
           <HelpCircle size={18} />
           Pomoc
         </button>
@@ -191,16 +415,16 @@ function Sidebar({
           <span />
         </div>
         <p>126 z 300 min wykorzystane</p>
-        <button>Ulepsz plan</button>
+        <button disabled title="Płatne plany nie są jeszcze dostępne">Ulepsz plan</button>
       </div>
 
       <div className="profile">
-        <div className="avatar">JK</div>
+        <div className="avatar">{user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div>
         <div>
-          <strong>Jakub Kowalski</strong>
-          <span>Plan Creator</span>
+          <strong>{user.name}</strong>
+          <span>{user.email}</span>
         </div>
-        <MoreHorizontal size={18} />
+        <button className="profile-logout" onClick={onLogout} aria-label="Wyloguj się" title="Wyloguj się"><X size={17} /></button>
       </div>
     </aside>
   );
@@ -214,7 +438,7 @@ function Topbar({ title, subtitle }: { title: string; subtitle?: string }) {
         {subtitle && <p>{subtitle}</p>}
       </div>
       <div className="top-actions">
-        <button className="icon-button" aria-label="Wiadomości">
+        <button className="icon-button" aria-label="Wiadomości niedostępne" disabled title="Wiadomości pojawią się w kolejnej wersji">
           <MessageSquareText size={19} />
           <span className="notification-dot" />
         </button>
@@ -228,15 +452,36 @@ function Topbar({ title, subtitle }: { title: string; subtitle?: string }) {
 function HomeScreen({
   onFile,
   onDemo,
+  user,
+  projects,
+  onOpenProject,
+  onDeleteProject,
 }: {
-  onFile: (file: File) => void;
+  onFile: (file: File) => Promise<string | undefined>;
   onDemo: () => void;
+  user: ApiUser;
+  projects: ApiProject[];
+  onOpenProject: (project: ApiProject) => void;
+  onDeleteProject: (project: ApiProject) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [uploadError, setUploadError] = useState<string>();
+  const [preparing, setPreparing] = useState(false);
 
-  const accept = (file?: File) => {
-    if (file && file.type.startsWith("video/")) onFile(file);
+  const accept = async (file?: File) => {
+    if (!file || preparing) return;
+    const validationError = validateVideoFile(file);
+    if (validationError) {
+      setUploadError(validationError);
+      return;
+    }
+
+    setPreparing(true);
+    setUploadError(undefined);
+    const error = await onFile(file);
+    setPreparing(false);
+    setUploadError(error);
   };
 
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -247,7 +492,7 @@ function HomeScreen({
 
   return (
     <main className="content">
-      <Topbar title="Dzień dobry, Jakub 👋" subtitle="Zamień długie nagranie w klipy, które zatrzymują uwagę." />
+      <Topbar title={`Dzień dobry, ${user.name.split(" ")[0]} 👋`} subtitle="Zamień długie nagranie w klipy, które zatrzymują uwagę." />
       <section className="home-body">
         <div className="hero-copy">
           <span className="eyebrow"><Sparkles size={14} /> AI VIDEO CLIPPER</span>
@@ -270,6 +515,7 @@ function HomeScreen({
           <input
             ref={inputRef}
             type="file"
+            disabled={preparing}
             accept="video/mp4,video/quicktime,video/webm"
             onChange={(event: ChangeEvent<HTMLInputElement>) => accept(event.target.files?.[0])}
           />
@@ -278,10 +524,11 @@ function HomeScreen({
           </div>
           <h3>Przeciągnij tutaj swój film</h3>
           <p>lub wybierz plik z komputera</p>
-          <button className="primary-button" onClick={() => inputRef.current?.click()}>
-            <UploadCloud size={17} />
-            Wybierz plik
+          <button className="primary-button" disabled={preparing} onClick={() => inputRef.current?.click()}>
+            {preparing ? <LoaderCircle size={17} className="spin" /> : <UploadCloud size={17} />}
+            {preparing ? "Sprawdzanie pliku…" : "Wybierz plik"}
           </button>
+          {uploadError && <p className="upload-error" role="alert">{uploadError}</p>}
           <div className="upload-meta">
             <span>MP4, MOV, WebM</span>
             <i />
@@ -302,79 +549,83 @@ function HomeScreen({
             <h3>Ostatnie projekty</h3>
             <p>Wróć do swoich ostatnich nagrań.</p>
           </div>
-          <button onClick={onDemo}>Zobacz wszystkie <ArrowRight size={15} /></button>
+          {!projects.length && <button onClick={onDemo}>Otwórz demo <ArrowRight size={15} /></button>}
         </div>
 
         <div className="project-grid">
-          <button className="project-card" onClick={onDemo}>
-            <div className="project-thumb scene-purple">
-              <span className="duration-badge">30:34</span>
-              <div className="person person-one" />
-              <div className="person person-two" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Jak zbudować produkt, którego ludzie chcą</h4>
-              <p>4 klipy · dzisiaj, 09:42</p>
-            </div>
-          </button>
-          <button className="project-card muted-card" onClick={onDemo}>
-            <div className="project-thumb scene-blue">
-              <span className="duration-badge">52:18</span>
-              <div className="abstract-mic" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Podcast: przyszłość pracy z AI</h4>
-              <p>7 klipów · 18 cze, 15:20</p>
-            </div>
-          </button>
-          <button className="project-card muted-card" onClick={onDemo}>
-            <div className="project-thumb scene-green">
-              <span className="duration-badge">18:05</span>
-              <div className="abstract-screen" />
-              <div className="play-circle"><Play size={18} fill="currentColor" /></div>
-            </div>
-            <div className="project-info">
-              <span className="status-ready"><Check size={12} /> Gotowe</span>
-              <h4>Demo produktu — czerwiec 2026</h4>
-              <p>3 klipy · 15 cze, 12:08</p>
-            </div>
-          </button>
+          {projects.map((project, index) => (
+            <article className="project-card" key={project.id}>
+              <button className="project-open" onClick={() => onOpenProject(project)}>
+                <div className={`project-thumb ${["scene-purple", "scene-blue", "scene-green"][index % 3]}`}>
+                  <span className="duration-badge">{project.durationSeconds ? fmt(project.durationSeconds) : "—:—"}</span>
+                  <div className="abstract-screen" />
+                  <div className="play-circle"><Play size={18} fill="currentColor" /></div>
+                </div>
+                <div className="project-info">
+                  <span className="status-ready"><Check size={12} /> {project.status === "ready" ? "Gotowy" : project.status === "uploaded" ? "Wgrano" : "Przetwarzanie"}</span>
+                  <h4>{project.title}</h4>
+                  <p>{(project.sizeBytes / 1024 / 1024).toFixed(1)} MB · {new Date(project.createdAt).toLocaleString("pl-PL")}</p>
+                </div>
+              </button>
+              <button className="project-delete" onClick={() => onDeleteProject(project)} aria-label={`Usuń projekt ${project.title}`}><X size={15} /></button>
+            </article>
+          ))}
+          {!projects.length && (
+            <button className="project-card" onClick={onDemo}>
+              <div className="project-thumb scene-purple">
+                <span className="duration-badge">30:34</span>
+                <div className="person person-one" />
+                <div className="person person-two" />
+                <div className="play-circle"><Play size={18} fill="currentColor" /></div>
+              </div>
+              <div className="project-info">
+                <span className="status-ready"><Sparkles size={12} /> Demo</span>
+                <h4>Zobacz przykładowy projekt Cutwise</h4>
+                <p>4 demonstracyjne klipy</p>
+              </div>
+            </button>
+          )}
         </div>
       </section>
     </main>
   );
 }
 
-function AnalysisScreen({
+export function AnalysisScreen({
   fileName,
   videoUrl,
   onComplete,
   onCancel,
+  ready = true,
+  error,
 }: {
   fileName: string;
   videoUrl?: string;
   onComplete: () => void;
   onCancel: () => void;
+  ready?: boolean;
+  error?: string;
 }) {
   const [progress, setProgress] = useState(8);
+  const previousReady = useRef(ready);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setProgress((current) => {
-        if (current >= 100) {
-          window.clearInterval(timer);
-          window.setTimeout(onComplete, 450);
-          return 100;
-        }
-        return Math.min(100, current + (current < 55 ? 4 : 2));
-      });
+      setProgress((current) => Math.min(ready ? 100 : 94, current + (current < 55 ? 4 : 2)));
     }, 220);
     return () => window.clearInterval(timer);
-  }, [onComplete]);
+  }, [ready]);
+
+  useEffect(() => {
+    if (!previousReady.current && ready) setProgress(100);
+    previousReady.current = ready;
+  }, [ready]);
+
+  useEffect(() => {
+    if (progress < 100) return;
+    const completionTimer = window.setTimeout(onComplete, 450);
+    return () => window.clearTimeout(completionTimer);
+  }, [onComplete, progress]);
 
   const activeStep = progress < 25 ? 0 : progress < 52 ? 1 : progress < 78 ? 2 : 3;
 
@@ -420,9 +671,10 @@ function AnalysisScreen({
             </div>
             <div className="analysis-note">
               <Info size={17} />
-              <p>Możesz bezpiecznie zamknąć tę kartę. Powiadomimy Cię, gdy klipy będą gotowe.</p>
+              <p>Pozostaw tę kartę otwartą do zakończenia analizy. Możesz ją anulować i wrócić do projektu później.</p>
             </div>
-            <button className="text-button danger" onClick={onCancel}>Anuluj analizę</button>
+            {error && <p className="upload-error" role="alert">{error}</p>}
+            <button className="text-button danger" onClick={onCancel}>{error ? "Wróć" : "Anuluj analizę"}</button>
           </div>
         </div>
       </section>
@@ -430,13 +682,19 @@ function AnalysisScreen({
   );
 }
 
-function VideoScene({
+export function VideoScene({
   accent,
   ratio = "16:9",
   videoUrl,
   transcript,
   playing,
   onToggle,
+  start = 0,
+  end,
+  onPlaybackEnd,
+  onProgress,
+  playbackRate = 1,
+  seekTo,
 }: {
   accent: string;
   ratio?: Ratio;
@@ -444,11 +702,86 @@ function VideoScene({
   transcript?: string;
   playing?: boolean;
   onToggle?: () => void;
+  start?: number;
+  end?: number;
+  onPlaybackEnd?: () => void;
+  onProgress?: (currentTime: number) => void;
+  playbackRate?: number;
+  seekTo?: number;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const onPlaybackEndRef = useRef(onPlaybackEnd);
+  const onProgressRef = useRef(onProgress);
+  const playbackGenerationRef = useRef(0);
+
+  useEffect(() => {
+    onPlaybackEndRef.current = onPlaybackEnd;
+    onProgressRef.current = onProgress;
+  }, [onPlaybackEnd, onProgress]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 1) return;
+    const safeStart = Math.min(start, Math.max(0, video.duration - 0.1));
+    video.currentTime = safeStart;
+    onProgressRef.current?.(safeStart);
+  }, [end, start, videoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = playbackRate;
+  }, [playbackRate, videoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || seekTo === undefined || video.readyState < 1) return;
+    const safeEnd = Math.min(end ?? video.duration, video.duration || end || Number.POSITIVE_INFINITY);
+    video.currentTime = Math.max(start, Math.min(seekTo, safeEnd));
+    onProgressRef.current?.(video.currentTime);
+  }, [end, seekTo, start, videoUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const playbackGeneration = ++playbackGenerationRef.current;
+
+    if (!playing) {
+      video.pause();
+      return;
+    }
+
+    const safeEnd = Math.min(end ?? video.duration, video.duration || end || Number.POSITIVE_INFINITY);
+    if (video.currentTime < start || video.currentTime >= safeEnd) video.currentTime = start;
+    void video.play().catch(() => {
+      if (playbackGeneration === playbackGenerationRef.current) onPlaybackEndRef.current?.();
+    });
+  }, [end, playing, start, videoUrl]);
+
+  const keepInsideRange = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    onProgressRef.current?.(video.currentTime);
+    if (end === undefined || video.currentTime < end) return;
+    video.pause();
+    video.currentTime = start;
+    onProgressRef.current?.(start);
+    onPlaybackEndRef.current?.();
+  };
+
   return (
     <div className={`video-scene ${accent} ratio-${ratio.replace(":", "-")}`}>
       {videoUrl ? (
-        <video src={videoUrl} />
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          preload="metadata"
+          onLoadedMetadata={(event) => {
+            event.currentTarget.currentTime = Math.min(start, Math.max(0, event.currentTarget.duration - 0.1));
+          }}
+          onTimeUpdate={keepInsideRange}
+          onEnded={() => onPlaybackEndRef.current?.()}
+        />
       ) : (
         <>
           <div className="studio-light" />
@@ -458,7 +791,11 @@ function VideoScene({
       )}
       {transcript && <div className="scene-caption">{transcript.split(".")[0]}.</div>}
       {onToggle && (
-        <button className="play-circle large-play" onClick={onToggle}>
+        <button
+          className="play-circle large-play"
+          onClick={onToggle}
+          aria-label={playing ? "Wstrzymaj odtwarzanie" : "Odtwórz klip"}
+        >
           {playing ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
         </button>
       )}
@@ -480,21 +817,34 @@ function ClipCard({
   onEdit,
   onToggle,
   onExport,
+  playing,
+  onTogglePlayback,
+  onPlaybackEnd,
 }: {
   clip: Clip;
   videoUrl?: string;
   onEdit: () => void;
   onToggle: () => void;
   onExport: () => void;
+  playing: boolean;
+  onTogglePlayback: () => void;
+  onPlaybackEnd: () => void;
 }) {
-  const [playing, setPlaying] = useState(false);
   return (
     <article className={`clip-card ${clip.selected ? "selected" : ""}`}>
       <button className="select-check" onClick={onToggle} aria-label="Wybierz klip">
         {clip.selected && <Check size={14} />}
       </button>
       <div className="clip-preview">
-        <VideoScene accent={clip.accent} videoUrl={videoUrl} playing={playing} onToggle={() => setPlaying(!playing)} />
+        <VideoScene
+          accent={clip.accent}
+          videoUrl={videoUrl}
+          playing={playing}
+          start={clip.start}
+          end={clip.end}
+          onToggle={videoUrl ? onTogglePlayback : undefined}
+          onPlaybackEnd={onPlaybackEnd}
+        />
         <span className="clip-time"><Clock3 size={12} /> {fmt(clip.end - clip.start)}</span>
       </div>
       <div className="clip-main">
@@ -525,27 +875,60 @@ function ResultsScreen({
   clips,
   fileName,
   videoUrl,
+  videoDuration,
   onClipsChange,
   onHome,
+  onRegenerate,
+  onExport,
+  isDemo,
 }: {
   clips: Clip[];
   fileName: string;
   videoUrl?: string;
-  onClipsChange: (clips: Clip[]) => void;
+  videoDuration: number;
+  onClipsChange: (clips: Clip[]) => Promise<void>;
   onHome: () => void;
+  onRegenerate: (options: { prompt: string; minClipSeconds: number; maxClipSeconds: number }) => void;
+  onExport?: (clips: Clip[]) => Promise<void>;
+  isDemo: boolean;
 }) {
   const [editorClip, setEditorClip] = useState<Clip | null>(null);
-  const [exportClip, setExportClip] = useState<Clip | null>(null);
+  const [exportClips, setExportClips] = useState<Clip[] | null>(null);
+  const [clipView, setClipView] = useState<"all" | "score" | "short" | "selected">("all");
+  const [activePlaybackId, setActivePlaybackId] = useState<string | number | null>(null);
+  const [analysisPrompt, setAnalysisPrompt] = useState("");
+  const [minClipSeconds, setMinClipSeconds] = useState(20);
+  const [maxClipSeconds, setMaxClipSeconds] = useState(90);
   const selectedCount = clips.filter((clip) => clip.selected).length;
+  const totalClipDuration = clips.reduce((total, clip) => total + clip.end - clip.start, 0);
+  const averageScore = Math.round(clips.reduce((total, clip) => total + clip.score, 0) / Math.max(1, clips.length));
 
-  const updateClip = (updated: Clip) => {
-    onClipsChange(clips.map((clip) => clip.id === updated.id ? updated : clip));
-    setEditorClip(updated);
+  const visibleClips = useMemo(() => {
+    if (clipView === "score") return [...clips].sort((a, b) => b.score - a.score);
+    if (clipView === "short") return [...clips].sort((a, b) => (a.end - a.start) - (b.end - b.start));
+    if (clipView === "selected") return clips.filter((clip) => clip.selected);
+    return clips;
+  }, [clipView, clips]);
+
+  useEffect(() => {
+    if (activePlaybackId !== null && !visibleClips.some((clip) => clip.id === activePlaybackId)) {
+      setActivePlaybackId(null);
+    }
+  }, [activePlaybackId, visibleClips]);
+
+  const openEditor = (clip: Clip) => {
+    setActivePlaybackId(null);
+    setEditorClip(clip);
+  };
+
+  const openExport = (nextClips: Clip[]) => {
+    setActivePlaybackId(null);
+    setExportClips(nextClips);
   };
 
   return (
     <main className="content">
-      <Topbar title="Twoje najlepsze momenty" subtitle="AI przeanalizowało nagranie i znalazło 4 fragmenty warte publikacji." />
+      <Topbar title="Twoje najlepsze momenty" subtitle={`Analiza znalazła ${clips.length} fragmenty warte publikacji.`} />
       <section className="results-body">
         <div className="project-summary">
           <button className="back-button" onClick={onHome}><ArrowLeft size={16} /></button>
@@ -556,14 +939,14 @@ function ResultsScreen({
           <div className="summary-copy">
             <span className="status-ready"><Check size={12} /> Analiza zakończona</span>
             <h2>{fileName.replace(/\.[^.]+$/, "")}</h2>
-            <p>30:34 min · Polski · 2 rozmówców</p>
+            <p>{fmt(videoDuration)} min · {isDemo ? "wersja demonstracyjna" : "lokalna analiza bazowa"}</p>
           </div>
           <div className="summary-stats">
-            <div><strong>4</strong><span>propozycje</span></div>
-            <div><strong>3:22</strong><span>łącznie</span></div>
-            <div><strong>89</strong><span>śr. AI score</span></div>
+            <div><strong>{clips.length}</strong><span>propozycje</span></div>
+            <div><strong>{fmt(totalClipDuration)}</strong><span>łącznie</span></div>
+            <div><strong>{averageScore}</strong><span>śr. AI score</span></div>
           </div>
-          <button className="icon-button"><MoreHorizontal size={19} /></button>
+          <button className="icon-button" aria-label="Więcej opcji" disabled title="Dodatkowe opcje pojawią się w kolejnej wersji"><MoreHorizontal size={19} /></button>
         </div>
 
         <div className="results-toolbar">
@@ -572,31 +955,71 @@ function ResultsScreen({
             <p>Wybierz fragmenty, które chcesz zachować lub dopracować.</p>
           </div>
           <div className="toolbar-actions">
-            <button className="secondary-button"><RefreshCw size={15} /> Generuj ponownie</button>
-            <button className="primary-button" disabled={!selectedCount} onClick={() => setExportClip(clips.find((c) => c.selected) ?? clips[0])}>
+            <button
+              className="secondary-button"
+              onClick={() => onRegenerate({ prompt: analysisPrompt, minClipSeconds, maxClipSeconds })}
+              disabled={!clips.length || videoDuration <= 0 || maxClipSeconds < minClipSeconds}
+            >
+              <RefreshCw size={15} /> Generuj nowe
+            </button>
+            <button className="primary-button" disabled={!selectedCount} onClick={() => openExport(clips.filter((clip) => clip.selected))}>
               Eksportuj wybrane <span>{selectedCount}</span>
             </button>
           </div>
         </div>
 
+        <div className="prompt-panel">
+          <div>
+            <label htmlFor="clip-prompt">Jakich momentów szukasz?</label>
+            <textarea
+              id="clip-prompt"
+              value={analysisPrompt}
+              onChange={(event) => setAnalysisPrompt(event.target.value)}
+              placeholder="Np. zabawne sceny, kontrowersyjne wypowiedzi, najmocniejsze cytaty albo dynamiczne fragmenty do Reels."
+              maxLength={800}
+            />
+          </div>
+          <div className="length-controls">
+            <label>
+              Minimum
+              <select value={minClipSeconds} onChange={(event) => setMinClipSeconds(Number(event.target.value))}>
+                {[15, 20, 30, 45, 60].map((seconds) => <option key={seconds} value={seconds}>{seconds} s</option>)}
+              </select>
+            </label>
+            <label>
+              Maksimum
+              <select value={maxClipSeconds} onChange={(event) => setMaxClipSeconds(Number(event.target.value))}>
+                {[45, 60, 90, 120, 180].map((seconds) => <option key={seconds} value={seconds}>{seconds} s</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+
         <div className="filter-row">
-          <button className="filter active">Wszystkie <span>4</span></button>
-          <button className="filter">Najwyższy score</button>
-          <button className="filter">Najkrótsze</button>
-          <button className="filter"><SlidersIcon /> Filtry</button>
+          <button className={`filter ${clipView === "all" ? "active" : ""}`} onClick={() => setClipView("all")}>Wszystkie <span>{clips.length}</span></button>
+          <button className={`filter ${clipView === "score" ? "active" : ""}`} onClick={() => setClipView("score")}>Najwyższy score</button>
+          <button className={`filter ${clipView === "short" ? "active" : ""}`} onClick={() => setClipView("short")}>Najkrótsze</button>
+          <button className={`filter ${clipView === "selected" ? "active" : ""}`} onClick={() => setClipView("selected")}><SlidersIcon /> Wybrane</button>
         </div>
 
         <div className="clips-list">
-          {clips.map((clip) => (
+          {visibleClips.map((clip) => (
             <ClipCard
               key={clip.id}
               clip={clip}
               videoUrl={videoUrl}
-              onEdit={() => setEditorClip(clip)}
-              onToggle={() => onClipsChange(clips.map((item) => item.id === clip.id ? { ...item, selected: !item.selected } : item))}
-              onExport={() => setExportClip(clip)}
+              playing={activePlaybackId === clip.id}
+              onTogglePlayback={() => setActivePlaybackId((current) => current === clip.id ? null : clip.id)}
+              onPlaybackEnd={() => setActivePlaybackId((current) => current === clip.id ? null : current)}
+              onEdit={() => openEditor(clip)}
+              onToggle={() => {
+                void onClipsChange(clips.map((item) => item.id === clip.id ? { ...item, selected: !item.selected } : item))
+                  .catch((error) => window.alert(error instanceof Error ? error.message : "Nie udało się zapisać wyboru."));
+              }}
+              onExport={() => openExport([clip])}
             />
           ))}
+          {!visibleClips.length && <p className="empty-clips">Nie masz jeszcze wybranych klipów.</p>}
         </div>
       </section>
 
@@ -604,15 +1027,27 @@ function ResultsScreen({
         <EditorModal
           clip={editorClip}
           videoUrl={videoUrl}
-          onChange={updateClip}
+          maxDuration={videoDuration}
           onClose={() => setEditorClip(null)}
-          onExport={() => {
-            setExportClip(editorClip);
+          onSave={async (updated, exportAfterSave) => {
+            await onClipsChange(clips.map((clip) => clip.id === updated.id ? updated : clip));
             setEditorClip(null);
+            if (exportAfterSave) openExport([updated]);
           }}
         />
       )}
-      {exportClip && <ExportModal clip={exportClip} onClose={() => setExportClip(null)} />}
+      {exportClips && (
+        <ExportModal
+          clips={exportClips}
+          videoUrl={videoUrl}
+          onClose={() => setExportClips(null)}
+          onExport={onExport}
+          onConfigsChange={async (updatedClips) => {
+            const updates = new Map(updatedClips.map((clip) => [clip.id, clip]));
+            await onClipsChange(clips.map((clip) => updates.get(clip.id) ?? clip));
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -628,75 +1063,164 @@ function SlidersIcon() {
 function EditorModal({
   clip,
   videoUrl,
-  onChange,
+  maxDuration,
   onClose,
-  onExport,
+  onSave,
 }: {
   clip: Clip;
   videoUrl?: string;
-  onChange: (clip: Clip) => void;
+  maxDuration: number;
   onClose: () => void;
-  onExport: () => void;
+  onSave: (clip: Clip, exportAfterSave: boolean) => Promise<void>;
 }) {
+  const [draftClip, setDraftClip] = useState({ ...clip, renderConfig: { ...clip.renderConfig } });
   const [playing, setPlaying] = useState(false);
-  const duration = clip.end - clip.start;
-  const waveform = useMemo(() => Array.from({ length: 90 }, (_, i) => 16 + ((i * 17 + clip.id * 23) % 46)), [clip.id]);
+  const [currentTime, setCurrentTime] = useState(clip.start);
+  const [seekTarget, setSeekTarget] = useState<number>();
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  const duration = draftClip.end - draftClip.start;
+  const waveform = useMemo(() => {
+    const seed = String(clip.id).split("").reduce((total, character) => total + character.charCodeAt(0), 0);
+    return Array.from({ length: 90 }, (_, i) => 16 + ((i * 17 + seed * 23) % 46));
+  }, [clip.id]);
+  const progress = Math.max(0, Math.min(100, ((currentTime - draftClip.start) / Math.max(1, duration)) * 100));
+  const minClipLength = Math.min(5, maxDuration);
+  const { ratio } = draftClip.renderConfig;
+  const dialogRef = useDialogFocus(onClose, saving);
 
-  const setStart = (value: number) => onChange({ ...clip, start: Math.min(value, clip.end - 5) });
-  const setEnd = (value: number) => onChange({ ...clip, end: Math.max(value, clip.start + 5) });
+  const setStart = (value: number) => {
+    const nextStart = Math.max(0, Math.min(value, draftClip.end - minClipLength));
+    setDraftClip({ ...draftClip, start: nextStart });
+    setCurrentTime(nextStart);
+    setSeekTarget(undefined);
+  };
+  const setEnd = (value: number) => {
+    const nextEnd = Math.min(maxDuration, Math.max(value, draftClip.start + minClipLength));
+    setDraftClip({ ...draftClip, end: nextEnd });
+    setCurrentTime((current) => Math.min(current, nextEnd));
+    setSeekTarget(undefined);
+  };
+  const updateRenderConfig = (patch: Partial<RenderConfig>) => {
+    setDraftClip({ ...draftClip, renderConfig: { ...draftClip.renderConfig, ...patch } });
+  };
+  const seek = (value: number) => {
+    const nextTime = Math.max(draftClip.start, Math.min(value, draftClip.end));
+    setCurrentTime(nextTime);
+    setSeekTarget(nextTime);
+  };
+  const save = async (exportAfterSave: boolean) => {
+    setSaving(true);
+    setSaveError(undefined);
+    try {
+      await onSave(draftClip, exportAfterSave);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Nie udało się zapisać zmian klipu.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="modal-backdrop">
-      <div className="editor-modal">
+      <div ref={dialogRef} className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title" tabIndex={-1}>
         <header className="modal-header">
           <div>
             <span className="eyebrow"><Scissors size={14} /> EDYTOR KLIPU</span>
-            <h2>{clip.title}</h2>
+            <h2 id="editor-title">{draftClip.title}</h2>
           </div>
-          <button className="icon-button" onClick={onClose}><X size={20} /></button>
+          <button className="icon-button" onClick={onClose} aria-label="Zamknij edytor" disabled={saving}><X size={20} /></button>
         </header>
 
         <div className="editor-workspace">
           <div className="editor-preview-wrap">
             <VideoScene
-              accent={clip.accent}
-              ratio="16:9"
+              accent={draftClip.accent}
+              ratio={ratio}
               videoUrl={videoUrl}
-              transcript={clip.transcript}
+              transcript={draftClip.renderConfig.captionsEnabled ? draftClip.transcript : undefined}
               playing={playing}
-              onToggle={() => setPlaying(!playing)}
+              start={draftClip.start}
+              end={draftClip.end}
+              playbackRate={playbackRate}
+              seekTo={seekTarget}
+              onToggle={videoUrl ? () => setPlaying(!playing) : undefined}
+              onPlaybackEnd={() => setPlaying(false)}
+              onProgress={setCurrentTime}
             />
             <div className="playback">
-              <button onClick={() => setPlaying(!playing)}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
-              <span>{fmt(clip.start + 8)} / {fmt(clip.end)}</span>
-              <div className="playback-track"><span style={{ width: "22%" }} /></div>
-              <button><Subtitles size={17} /></button>
-              <button><Square size={16} /></button>
+              <button onClick={() => seek(currentTime - 10)} aria-label="Cofnij o 10 sekund" disabled={!videoUrl}>−10</button>
+              <button onClick={() => setPlaying(!playing)} aria-label={playing ? "Wstrzymaj podgląd" : "Odtwórz podgląd"} disabled={!videoUrl}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
+              <button onClick={() => seek(currentTime + 10)} aria-label="Przewiń o 10 sekund" disabled={!videoUrl}>+10</button>
+              <span>{fmt(currentTime)} / {fmt(draftClip.end)}</span>
+              <input
+                className="playback-track"
+                type="range"
+                min={draftClip.start}
+                max={draftClip.end}
+                step="0.1"
+                value={currentTime}
+                onChange={(event) => seek(Number(event.target.value))}
+                aria-label="Pozycja odtwarzania"
+                disabled={!videoUrl}
+                style={{ "--progress": `${progress}%` } as React.CSSProperties}
+              />
+              <select
+                className="playback-rate"
+                value={playbackRate}
+                onChange={(event) => setPlaybackRate(Number(event.target.value))}
+                aria-label="Prędkość odtwarzania"
+                disabled={!videoUrl}
+              >
+                {[0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+              </select>
+              <button
+                className={draftClip.renderConfig.captionsEnabled ? "active" : ""}
+                disabled={!draftClip.transcript.trim()}
+                title={draftClip.transcript.trim() ? "Włącz lub wyłącz napisy" : "Brak transkrypcji dla tego klipu"}
+                aria-label="Przełącz napisy"
+                onClick={() => updateRenderConfig({ captionsEnabled: !draftClip.renderConfig.captionsEnabled })}
+              >
+                <Subtitles size={17} />
+              </button>
+              <button disabled title="Tryb pełnoekranowy pojawi się w kolejnej wersji" aria-label="Tryb pełnoekranowy niedostępny"><Square size={16} /></button>
             </div>
           </div>
           <aside className="editor-settings">
             <div className="settings-section">
               <span className="settings-label">FORMAT KLIPU</span>
               <div className="ratio-options">
-                <button className="active"><span className="portrait-shape" />9:16<small>Reels, TikTok</small></button>
-                <button><span className="square-shape" />1:1<small>Instagram</small></button>
-                <button><span className="wide-shape" />16:9<small>YouTube</small></button>
+                <button className={ratio === "9:16" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "9:16" })}><span className="portrait-shape" />9:16<small>Reels, TikTok</small></button>
+                <button className={ratio === "1:1" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "1:1" })}><span className="square-shape" />1:1<small>Instagram</small></button>
+                <button className={ratio === "16:9" ? "active" : ""} onClick={() => updateRenderConfig({ ratio: "16:9" })}><span className="wide-shape" />16:9<small>YouTube</small></button>
               </div>
             </div>
             <div className="settings-section">
               <div className="toggle-row">
-                <div><Subtitles size={17} /><span><strong>Automatyczne napisy</strong><small>Dynamiczne wyróżnianie słów</small></span></div>
-                <button className="toggle active"><span /></button>
+                <div><Subtitles size={17} /><span><strong>Automatyczne napisy</strong><small>{draftClip.transcript.trim() ? "Podgląd i eksport z napisami" : "Wymagają transkrypcji AI"}</small></span></div>
+                <button
+                  className={`toggle ${draftClip.renderConfig.captionsEnabled ? "active" : ""}`}
+                  disabled={!draftClip.transcript.trim()}
+                  aria-label="Automatyczne napisy"
+                  onClick={() => updateRenderConfig({ captionsEnabled: !draftClip.renderConfig.captionsEnabled })}
+                >
+                  <span />
+                </button>
               </div>
               <div className="toggle-row">
-                <div><AlignCenter size={17} /><span><strong>Śledzenie twarzy</strong><small>Główna osoba w centrum</small></span></div>
-                <button className="toggle active"><span /></button>
+                <div><AlignCenter size={17} /><span><strong>Śledzenie twarzy</strong><small>Funkcja jeszcze niedostępna</small></span></div>
+                <button className="toggle" disabled aria-label="Śledzenie twarzy niedostępne"><span /></button>
               </div>
             </div>
             <div className="settings-section transcript-section">
               <span className="settings-label">TRANSKRYPCJA</span>
-              <p>{clip.transcript}</p>
-              <button><WandSparkles size={14} /> Popraw tekst z AI</button>
+              <textarea
+                value={draftClip.transcript}
+                onChange={(event) => setDraftClip({ ...draftClip, transcript: event.target.value })}
+                placeholder="Transkrypcja pojawi się po analizie AI. Możesz też wkleić lub poprawić tekst ręcznie."
+                aria-label="Transkrypcja klipu"
+              />
             </div>
           </aside>
         </div>
@@ -705,12 +1229,17 @@ function EditorModal({
           <div className="timeline-heading">
             <div>
               <strong>Zakres klipu</strong>
-              <span>{fmt(clip.start)} — {fmt(clip.end)} · {fmt(duration)}</span>
+              <span>{fmt(draftClip.start)} — {fmt(draftClip.end)} · {fmt(duration)}</span>
             </div>
-            <button><RotateCcw size={14} /> Przywróć</button>
+            <button onClick={() => {
+              setDraftClip({ ...clip, renderConfig: { ...clip.renderConfig } });
+              setCurrentTime(clip.start);
+              setSeekTarget(undefined);
+              setPlaying(false);
+            }}><RotateCcw size={14} /> Przywróć</button>
           </div>
           <div className="timeline-ruler">
-            {[0, 1, 2, 3, 4, 5].map((n) => <span key={n}>{fmt(Math.max(0, clip.start - 10 + n * 16))}</span>)}
+            {[0, 1, 2, 3, 4, 5].map((n) => <span key={n}>{fmt(Math.max(0, draftClip.start - 10 + n * 16))}</span>)}
           </div>
           <div className="waveform">
             {waveform.map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}
@@ -721,30 +1250,85 @@ function EditorModal({
             <div className="playhead"><span /></div>
           </div>
           <div className="range-inputs">
-            <label>Początek <div><button onClick={() => setStart(clip.start - 1)}>−</button><input type="text" value={fmt(clip.start)} readOnly /><button onClick={() => setStart(clip.start + 1)}>+</button></div></label>
-            <label>Koniec <div><button onClick={() => setEnd(clip.end - 1)}>−</button><input type="text" value={fmt(clip.end)} readOnly /><button onClick={() => setEnd(clip.end + 1)}>+</button></div></label>
+            <label>Początek <div><button aria-label="Cofnij początek o sekundę" onClick={() => setStart(draftClip.start - 1)}>−</button><input type="text" value={fmt(draftClip.start)} readOnly /><button aria-label="Przesuń początek o sekundę" onClick={() => setStart(draftClip.start + 1)}>+</button></div></label>
+            <label>Koniec <div><button aria-label="Cofnij koniec o sekundę" onClick={() => setEnd(draftClip.end - 1)}>−</button><input type="text" value={fmt(draftClip.end)} readOnly /><button aria-label="Przesuń koniec o sekundę" onClick={() => setEnd(draftClip.end + 1)}>+</button></div></label>
             <span className="duration-pill"><Clock3 size={14} /> Długość: {fmt(duration)}</span>
           </div>
         </div>
 
         <footer className="modal-footer">
-          <button className="secondary-button" onClick={onClose}>Anuluj</button>
-          <button className="primary-button" onClick={onExport}>Zapisz i eksportuj <ArrowRight size={16} /></button>
+          {saveError && <p className="upload-error" role="alert">{saveError}</p>}
+          <button className="secondary-button" onClick={onClose} disabled={saving}>Anuluj</button>
+          <button className="secondary-button" onClick={() => void save(false)} disabled={saving}>Zapisz zmiany</button>
+          <button className="primary-button" onClick={() => void save(true)} disabled={saving}>
+            {saving ? <LoaderCircle size={16} className="spin" /> : <>Zapisz i eksportuj <ArrowRight size={16} /></>}
+          </button>
         </footer>
       </div>
     </div>
   );
 }
 
-function ExportModal({ clip, onClose }: { clip: Clip; onClose: () => void }) {
-  const [ratio, setRatio] = useState<Ratio>("9:16");
-  const [quality, setQuality] = useState("1080p");
+function ExportModal({
+  clips,
+  videoUrl,
+  onClose,
+  onConfigsChange,
+  onExport,
+}: {
+  clips: Clip[];
+  videoUrl?: string;
+  onClose: () => void;
+  onConfigsChange: (clips: Clip[]) => Promise<void>;
+  onExport?: (clips: Clip[]) => Promise<void>;
+}) {
+  const [configuredClips, setConfiguredClips] = useState(() =>
+    clips.map((clip) => ({ ...clip, renderConfig: { ...clip.renderConfig } })),
+  );
   const [exporting, setExporting] = useState(false);
   const [done, setDone] = useState(false);
+  const [exportError, setExportError] = useState<string>();
+  const exportTimerRef = useRef<number | undefined>(undefined);
+  const dialogRef = useDialogFocus(onClose, exporting);
+  const firstClip = configuredClips[0];
+  const commonRatio = configuredClips.every((clip) => clip.renderConfig.ratio === firstClip.renderConfig.ratio)
+    ? firstClip.renderConfig.ratio
+    : undefined;
+  const commonQuality = configuredClips.every((clip) => clip.renderConfig.quality === firstClip.renderConfig.quality)
+    ? firstClip.renderConfig.quality
+    : undefined;
 
-  const exportVideo = () => {
+  useEffect(() => () => {
+    if (exportTimerRef.current) window.clearTimeout(exportTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!done) return;
+    dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+  }, [dialogRef, done]);
+
+  const exportVideo = async () => {
     setExporting(true);
-    window.setTimeout(() => {
+    setExportError(undefined);
+    try {
+      await onConfigsChange(configuredClips);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Nie udało się zapisać ustawień eksportu.");
+      setExporting(false);
+      return;
+    }
+    if (onExport) {
+      try {
+        await onExport(configuredClips);
+        setDone(true);
+      } catch (error) {
+        setExportError(error instanceof Error ? error.message : "Nie udało się wyrenderować klipu.");
+      } finally {
+        setExporting(false);
+      }
+      return;
+    }
+    exportTimerRef.current = window.setTimeout(() => {
       setExporting(false);
       setDone(true);
     }, 1800);
@@ -752,42 +1336,67 @@ function ExportModal({ clip, onClose }: { clip: Clip; onClose: () => void }) {
 
   const downloadManifest = () => {
     const payload = {
-      title: clip.title,
-      source_range: { start: clip.start, end: clip.end },
-      ratio,
-      quality,
       format: "MP4 / H.264",
       status: "ready_for_render_pipeline",
+      clips: configuredClips.map((clip) => ({
+        id: clip.id,
+        title: clip.title,
+        source_range: { start: clip.start, end: clip.end },
+        render_config: {
+          ratio: clip.renderConfig.ratio,
+          quality: clip.renderConfig.quality,
+          captions_enabled: clip.renderConfig.captionsEnabled,
+          tracking_enabled: clip.renderConfig.trackingEnabled,
+        },
+      })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${clip.title.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-export.json`;
+    anchor.download = configuredClips.length === 1
+      ? `${firstClip.title.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}-export.json`
+      : `cutwise-${configuredClips.length}-clips-export.json`;
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   return (
     <div className="modal-backdrop">
-      <div className="export-modal">
+      <div ref={dialogRef} className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-title" tabIndex={-1}>
         <header className="modal-header">
-          <div><span className="eyebrow"><Download size={14} /> EKSPORT</span><h2>Przygotuj klip do publikacji</h2></div>
-          <button className="icon-button" onClick={onClose}><X size={20} /></button>
+          <div><span className="eyebrow"><Download size={14} /> EKSPORT</span><h2 id="export-title">Przygotuj {configuredClips.length === 1 ? "klip" : `${configuredClips.length} klipy`} do publikacji</h2></div>
+          <button className="icon-button" onClick={onClose} aria-label="Zamknij eksport" disabled={exporting}><X size={20} /></button>
         </header>
         {!done ? (
           <>
             <div className="export-content">
               <div className="export-preview">
-                <VideoScene accent={clip.accent} ratio={ratio} transcript={clip.transcript} />
-                <p>{clip.title}</p>
-                <span>{fmt(clip.end - clip.start)} · MP4</span>
+                <VideoScene
+                  accent={firstClip.accent}
+                  ratio={firstClip.renderConfig.ratio}
+                  videoUrl={videoUrl}
+                  transcript={firstClip.renderConfig.captionsEnabled ? firstClip.transcript : undefined}
+                  start={firstClip.start}
+                  end={firstClip.end}
+                />
+                <p>{firstClip.title}</p>
+                <span>{configuredClips.length === 1 ? fmt(firstClip.end - firstClip.start) : `${configuredClips.length} pliki`} · MP4</span>
               </div>
               <div className="export-options">
-                <label>Format obrazu</label>
+                <label>Format obrazu{configuredClips.length > 1 ? " · zmiana obejmie wszystkie klipy" : ""}</label>
                 <div className="export-ratios">
                   {(["9:16", "1:1", "16:9"] as Ratio[]).map((item) => (
-                    <button key={item} className={ratio === item ? "active" : ""} onClick={() => setRatio(item)}>
+                    <button
+                      key={item}
+                      className={commonRatio === item ? "active" : ""}
+                      onClick={() => setConfiguredClips(configuredClips.map((clip) => ({
+                        ...clip,
+                        renderConfig: { ...clip.renderConfig, ratio: item },
+                      })))}
+                    >
                       <span className={`shape shape-${item.replace(":", "-")}`} />
                       <strong>{item}</strong>
                       <small>{item === "9:16" ? "TikTok, Reels, Shorts" : item === "1:1" ? "Instagram Feed" : "YouTube, LinkedIn"}</small>
@@ -796,26 +1405,38 @@ function ExportModal({ clip, onClose }: { clip: Clip; onClose: () => void }) {
                 </div>
                 <label>Jakość wideo</label>
                 <div className="quality-row">
-                  {["720p", "1080p", "4K"].map((item) => <button key={item} className={quality === item ? "active" : ""} onClick={() => setQuality(item)}>{item}{item === "1080p" && <span>Polecane</span>}</button>)}
+                  {(["720p", "1080p", "4K"] as Quality[]).map((item) => (
+                    <button
+                      key={item}
+                      className={commonQuality === item ? "active" : ""}
+                      onClick={() => setConfiguredClips(configuredClips.map((clip) => ({
+                        ...clip,
+                        renderConfig: { ...clip.renderConfig, quality: item },
+                      })))}
+                    >
+                      {item}{item === "1080p" && <span>Polecane</span>}
+                    </button>
+                  ))}
                 </div>
                 <div className="export-detail"><span>Format</span><strong>MP4 · H.264</strong></div>
-                <div className="export-detail"><span>Szacowany rozmiar</span><strong>~ 42 MB</strong></div>
+                <div className="export-detail"><span>Szacowany rozmiar</span><strong>~ {42 * configuredClips.length} MB</strong></div>
               </div>
             </div>
             <footer className="modal-footer">
-              <button className="secondary-button" onClick={onClose}>Anuluj</button>
+              {exportError && <p className="upload-error" role="alert">{exportError}</p>}
+              <button className="secondary-button" onClick={onClose} disabled={exporting}>Anuluj</button>
               <button className="primary-button" onClick={exportVideo} disabled={exporting}>
-                {exporting ? <><LoaderCircle size={17} className="spin" /> Renderowanie…</> : <><Download size={17} /> Eksportuj klip</>}
+                {exporting ? <><LoaderCircle size={17} className="spin" /> Renderowanie…</> : <><Download size={17} /> Eksportuj {configuredClips.length === 1 ? "klip" : `${configuredClips.length} klipy`}</>}
               </button>
             </footer>
           </>
         ) : (
           <div className="export-success">
             <div className="success-mark"><Check size={34} /></div>
-            <span className="eyebrow">KLIP GOTOWY</span>
+            <span className="eyebrow">{configuredClips.length === 1 ? "KLIP GOTOWY" : "KLIPY GOTOWE"}</span>
             <h2>Świetnie wygląda!</h2>
-            <p>W produkcyjnej wersji wyrenderowany plik MP4 będzie gotowy do pobrania. Ten prototyp pobiera manifest eksportu.</p>
-            <button className="primary-button" onClick={downloadManifest}><Download size={17} /> Pobierz manifest</button>
+            <p>{onExport ? "Wyrenderowany plik MP4 został pobrany na urządzenie." : "Wersja demonstracyjna przygotowała manifest eksportu."}</p>
+            {!onExport && <button className="primary-button" onClick={downloadManifest}><Download size={17} /> Pobierz manifest</button>}
             <button className="text-button" onClick={onClose}>Wróć do klipów</button>
           </div>
         )}
@@ -825,44 +1446,303 @@ function ExportModal({ clip, onClose }: { clip: Clip; onClose: () => void }) {
 }
 
 export default function App() {
+  const testMode = import.meta.env.MODE === "test";
+  const [user, setUser] = useState<ApiUser | null>(
+    testMode ? { id: "test-user", name: "Jakub", email: "test@example.com" } : null,
+  );
+  const [token, setToken] = useState(() => testMode ? "test-token" : localStorage.getItem("cutwise_token"));
+  const [authLoading, setAuthLoading] = useState(!testMode && Boolean(token));
+  const [projects, setProjects] = useState<ApiProject[]>([]);
   const [screen, setScreen] = useState<Screen>("home");
-  const [clips, setClips] = useState(initialClips);
+  const [clips, setClips] = useState<Clip[]>([]);
   const [fileName, setFileName] = useState("Jak zbudować produkt, którego ludzie chcą.mp4");
   const [videoUrl, setVideoUrl] = useState<string>();
+  const [videoDuration, setVideoDuration] = useState(DEMO_DURATION);
+  const [activeProjectId, setActiveProjectId] = useState<string>();
+  const [analysisReady, setAnalysisReady] = useState(true);
+  const [analysisError, setAnalysisError] = useState<string>();
   const [mobileMenu, setMobileMenu] = useState(false);
+  const uploadGenerationRef = useRef(0);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const analysisAbortRef = useRef<AbortController | null>(null);
+  const clipSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const loadProjects = useCallback(async (activeToken: string) => {
+    const response = await api.listProjects(activeToken);
+    setProjects(response.projects);
+  }, []);
+
+  useEffect(() => {
+    if (!token || testMode) return;
+    let active = true;
+    Promise.all([api.me(token), api.listProjects(token)])
+      .then(([profile, projectList]) => {
+        if (!active) return;
+        setUser(profile.user);
+        setProjects(projectList.projects);
+      })
+      .catch(() => {
+        if (!active) return;
+        localStorage.removeItem("cutwise_token");
+        setToken(null);
+        setUser(null);
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    return () => { active = false; };
+  }, [testMode, token]);
 
   useEffect(() => () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
   }, [videoUrl]);
 
-  const handleFile = (file: File) => {
-    if (videoUrl) URL.revokeObjectURL(videoUrl);
+  const handleAuthenticated = (nextUser: ApiUser, nextToken: string) => {
+    localStorage.setItem("cutwise_token", nextToken);
+    setToken(nextToken);
+    setUser(nextUser);
+    setAuthLoading(false);
+    void loadProjects(nextToken).catch(() => setProjects([]));
+  };
+
+  const logout = () => {
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = null;
+    localStorage.removeItem("cutwise_token");
+    setToken(null);
+    setUser(null);
+    setProjects([]);
+    resetProject();
+  };
+
+  const handleFile = async (file: File) => {
+    const validationError = validateVideoFile(file);
+    if (validationError) return validationError;
+
+    const uploadGeneration = ++uploadGenerationRef.current;
+    const nextVideoUrl = URL.createObjectURL(file);
+
+    if (!token) {
+      URL.revokeObjectURL(nextVideoUrl);
+      return "Zaloguj się ponownie przed wysłaniem projektu.";
+    }
+    const activeToken = token;
+    const uploadController = new AbortController();
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = uploadController;
+
+    let persistedProject: ApiProject;
+    try {
+      const response = await api.createProject(activeToken, file, undefined, uploadController.signal);
+      persistedProject = response.project;
+    } catch (error) {
+      URL.revokeObjectURL(nextVideoUrl);
+      if (error instanceof DOMException && error.name === "AbortError") return undefined;
+      return error instanceof Error ? error.message : "Nie udało się zapisać projektu.";
+    } finally {
+      if (uploadAbortRef.current === uploadController) uploadAbortRef.current = null;
+    }
+
+    if (uploadGeneration !== uploadGenerationRef.current) {
+      URL.revokeObjectURL(nextVideoUrl);
+      void api.deleteProject(activeToken, persistedProject.id).catch(() => {
+        void loadProjects(activeToken).catch(() => undefined);
+      });
+      return undefined;
+    }
+
+    setProjects((current) => [persistedProject, ...current.filter((project) => project.id !== persistedProject.id)]);
     setFileName(file.name);
-    setVideoUrl(URL.createObjectURL(file));
+    setVideoDuration(persistedProject.durationSeconds ?? 0);
+    setActiveProjectId(persistedProject.id);
+    setClips([]);
+    setVideoUrl(nextVideoUrl);
+    setAnalysisReady(false);
+    setAnalysisError(undefined);
     setScreen("analysis");
+    const analysisController = new AbortController();
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = analysisController;
+    void api.analyzeProject(activeToken, persistedProject.id, {}, analysisController.signal)
+      .then((response) => {
+        if (uploadGeneration !== uploadGenerationRef.current) return;
+        setClips(decorateApiClips(response.clips));
+        setProjects((current) => current.map((project) => (
+          project.id === persistedProject.id ? { ...project, status: "ready" } : project
+        )));
+        setAnalysisReady(true);
+      })
+      .catch((error) => {
+        if (uploadGeneration !== uploadGenerationRef.current) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setAnalysisError(error instanceof Error ? error.message : "Nie udało się przeanalizować nagrania.");
+      })
+      .finally(() => {
+        if (analysisAbortRef.current === analysisController) analysisAbortRef.current = null;
+      });
+    return undefined;
   };
 
   const loadDemo = () => {
+    uploadGenerationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = null;
+    setVideoUrl(undefined);
+    setVideoDuration(DEMO_DURATION);
+    setActiveProjectId(undefined);
+    setAnalysisReady(true);
+    setAnalysisError(undefined);
+    setClips(cloneInitialClips());
     setFileName("Jak zbudować produkt, którego ludzie chcą.mp4");
     setScreen("results");
   };
 
+  const resetProject = () => {
+    uploadGenerationRef.current += 1;
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = null;
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = null;
+    setVideoUrl(undefined);
+    setVideoDuration(0);
+    setActiveProjectId(undefined);
+    setAnalysisReady(true);
+    setAnalysisError(undefined);
+    setClips([]);
+    setFileName("Nowy projekt.mp4");
+    setMobileMenu(false);
+    setScreen("home");
+  };
+
+  const openProject = async (project: ApiProject) => {
+    if (!token) return;
+    const projectGeneration = ++uploadGenerationRef.current;
+    analysisAbortRef.current?.abort();
+    const analysisController = new AbortController();
+    analysisAbortRef.current = analysisController;
+    try {
+      const media = await api.getProjectMediaUrl(token, project.id);
+      if (projectGeneration !== uploadGenerationRef.current) return;
+      const nextVideoUrl = media.url;
+      const duration = project.durationSeconds ?? await readVideoDuration(nextVideoUrl);
+      if (projectGeneration !== uploadGenerationRef.current) return;
+      const storedClips = await api.listClips(token, project.id);
+      if (projectGeneration !== uploadGenerationRef.current) return;
+      setFileName(project.sourceFilename);
+      setVideoDuration(duration);
+      setActiveProjectId(project.id);
+      setVideoUrl(nextVideoUrl);
+      if (storedClips.clips.length) {
+        setClips(decorateApiClips(storedClips.clips));
+        setScreen("results");
+      } else {
+        setClips([]);
+        setAnalysisReady(false);
+        setAnalysisError(undefined);
+        setScreen("analysis");
+        const analyzed = await api.analyzeProject(token, project.id, {}, analysisController.signal);
+        if (projectGeneration !== uploadGenerationRef.current) return;
+        setClips(decorateApiClips(analyzed.clips));
+        setAnalysisReady(true);
+      }
+    } catch (error) {
+      if (projectGeneration !== uploadGenerationRef.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      window.alert(error instanceof Error ? error.message : "Nie udało się otworzyć projektu.");
+    } finally {
+      if (analysisAbortRef.current === analysisController) analysisAbortRef.current = null;
+    }
+  };
+
+  const deleteProject = async (project: ApiProject) => {
+    if (!token || !window.confirm(`Usunąć projekt „${project.title}”?`)) return;
+    try {
+      await api.deleteProject(token, project.id);
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Nie udało się usunąć projektu.");
+    }
+  };
+
+  const persistClips = async (nextClips: Clip[]) => {
+    const previousClips = clips;
+    setClips(nextClips);
+    if (!token || !activeProjectId) return;
+    const clipsToSave = nextClips.filter(
+      (clip): clip is Clip & { id: string; projectId: string } => (
+        typeof clip.id === "string" && Boolean(clip.projectId)
+      ),
+    );
+    const saveTask = clipSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        for (const clip of clipsToSave) await api.updateClip(token, clip as ApiClip);
+      });
+    clipSaveQueueRef.current = saveTask;
+    try {
+      await saveTask;
+    } catch (error) {
+      setClips((current) => current === nextClips ? previousClips : current);
+      throw error;
+    }
+  };
+
+  const exportRealClips = activeProjectId && token
+      ? async (nextClips: Clip[]) => {
+        await clipSaveQueueRef.current;
+        for (const clip of nextClips) {
+          if (typeof clip.id !== "string" || !clip.projectId) continue;
+          const exported = await api.exportClip(token, clip as ApiClip);
+          const blob = await api.downloadExport(token, exported.export.downloadUrl);
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `${clip.title.toLowerCase().replace(/[^a-z0-9]+/gi, "-") || "cutwise-klip"}.mp4`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        }
+      }
+    : undefined;
+
+  if (authLoading) {
+    return <main className="auth-screen"><LoaderCircle size={34} className="spin" /></main>;
+  }
+
+  if (!user || !token) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className="app-shell">
-      <button className="mobile-menu-button" onClick={() => setMobileMenu(!mobileMenu)}><Menu size={20} /></button>
+      <button className="mobile-menu-button" onClick={() => setMobileMenu(!mobileMenu)} aria-label="Otwórz menu"><Menu size={20} /></button>
       <div className={mobileMenu ? "sidebar-mobile open" : "sidebar-mobile"} onClick={() => setMobileMenu(false)}>
         <div onClick={(event) => event.stopPropagation()}>
-          <Sidebar screen={screen} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} />
+          <Sidebar screen={screen} clipCount={clips.length} user={user} onLogout={logout} onNavigate={(next) => { setScreen(next); setMobileMenu(false); }} onNewProject={resetProject} />
         </div>
       </div>
-      <Sidebar screen={screen} onNavigate={setScreen} />
-      {screen === "home" && <HomeScreen onFile={handleFile} onDemo={loadDemo} />}
+      <Sidebar screen={screen} clipCount={clips.length} user={user} onLogout={logout} onNavigate={setScreen} onNewProject={resetProject} />
+      {screen === "home" && (
+        <HomeScreen
+          onFile={handleFile}
+          onDemo={loadDemo}
+          user={user}
+          projects={projects}
+          onOpenProject={openProject}
+          onDeleteProject={deleteProject}
+        />
+      )}
       {screen === "analysis" && (
         <AnalysisScreen
           fileName={fileName}
           videoUrl={videoUrl}
+          ready={analysisReady}
+          error={analysisError}
           onComplete={() => setScreen("results")}
-          onCancel={() => setScreen("home")}
+          onCancel={resetProject}
         />
       )}
       {screen === "results" && (
@@ -870,8 +1750,38 @@ export default function App() {
           clips={clips}
           fileName={fileName}
           videoUrl={videoUrl}
-          onClipsChange={setClips}
+          videoDuration={videoDuration}
+          onClipsChange={persistClips}
           onHome={() => setScreen("home")}
+          onRegenerate={(options) => {
+            if (!token || !activeProjectId) {
+              if (videoDuration > 0 && clips.length) setClips(clipsForDuration(videoDuration, clips, options));
+              return;
+            }
+            const analysisGeneration = ++uploadGenerationRef.current;
+            const analysisController = new AbortController();
+            analysisAbortRef.current?.abort();
+            analysisAbortRef.current = analysisController;
+            setScreen("analysis");
+            setAnalysisReady(false);
+            setAnalysisError(undefined);
+            void api.analyzeProject(token, activeProjectId, options, analysisController.signal)
+              .then((response) => {
+                if (analysisGeneration !== uploadGenerationRef.current) return;
+                setClips(decorateApiClips(response.clips));
+                setAnalysisReady(true);
+              })
+              .catch((error) => {
+                if (analysisGeneration !== uploadGenerationRef.current) return;
+                if (error instanceof DOMException && error.name === "AbortError") return;
+                setAnalysisError(error instanceof Error ? error.message : "Nie udało się ponowić analizy.");
+              })
+              .finally(() => {
+                if (analysisAbortRef.current === analysisController) analysisAbortRef.current = null;
+              });
+          }}
+          onExport={exportRealClips}
+          isDemo={!activeProjectId}
         />
       )}
     </div>

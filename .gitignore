@@ -1,5 +1,15 @@
 node_modules
+.venv
+__pycache__
+.pytest_cache
+*.pyc
 dist
+dist-server
+data
+uploads
+exports
+runtime
+backups
 .env
 .env.*
 !.env.example
